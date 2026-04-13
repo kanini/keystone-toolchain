@@ -407,12 +407,30 @@ func demoteMissingPathState(current string) string {
 }
 
 func lookupRepoHead(repoPath string) (string, bool) {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "HEAD")
+	gitPath, ok := resolveGitBinary()
+	if !ok {
+		return "", false
+	}
+	cmd := exec.Command(gitPath, "-C", repoPath, "rev-parse", "HEAD")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
 	}
 	return strings.TrimSpace(string(out)), true
+}
+
+func resolveGitBinary() (string, bool) {
+	if gitPath, err := exec.LookPath("git"); err == nil {
+		return gitPath, true
+	}
+	for _, candidate := range []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"} {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		return candidate, true
+	}
+	return "", false
 }
 
 func shortValue(v string) string {

@@ -472,14 +472,15 @@ func TestStatusHubReportsStaleWhenRepoHeadMoves(t *testing.T) {
 
 	// Put a kshub binary in the managed bin dir so the output resolves correctly.
 	// Without this, demoteMissingPathState downgrades STALE_LKG → UNKNOWN.
-	// Prepend (don't replace) so lookupRepoHead can still find the git binary.
+	// PATH only exposes the managed bin to prove repo HEAD lookup does not depend
+	// on the ambient shell PATH still containing git.
 	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
 		t.Fatalf("mkdir managed bin: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatalf("write kshub: %v", err)
 	}
-	t.Setenv("PATH", ctx.Config.ManagedBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", ctx.Config.ManagedBinDir)
 
 	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
 	if got := report.Repos[0].State; got != StateStaleLKG {
