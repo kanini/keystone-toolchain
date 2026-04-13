@@ -22,8 +22,8 @@ repos:
     repo_path: /Users/rc/git/keystone-hub
     install_cmd:
       - make
-      - install
-      - INSTALL_BIN_DIR={{stage_bin}}
+      - build-local
+      - BIN_DIR={{stage_bin}}
     expected_outputs:
       - kshub
     probe_cmd:
@@ -31,9 +31,10 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
+    status: ready
     notes:
-      - Makefile supports INSTALL_BIN_DIR and exposes build provenance.
+      - First ready adapter for sync M1.
+      - Uses staged build output through make build-local BIN_DIR=...
       - This repo produced the stale-binary warning that kicked off the work.
 
   - repo_id: keystone-hacker

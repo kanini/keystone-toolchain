@@ -57,7 +57,7 @@ func newApp(stdout, stderr io.Writer) *app {
 The first release surface is small on purpose:
 - version reports build provenance
 - status will report managed tool truth
-- sync will refresh managed tools into the Keystone bin dir
+- sync will refresh ready adapters into the Keystone bin dir
 
 The scaffold already carries the load-bearing CLI pieces:
 - build provenance
@@ -156,8 +156,10 @@ func (a *app) newSyncCmd() *cobra.Command {
 		Short: "Sync managed Keystone tools",
 		Long: `Sync managed Keystone tools into the configured Keystone bin dir.
 
-The command surface is scaffolded now so the tool shape is visible before the
-sync engine lands.`,
+Sync is intentionally narrow in v1:
+- it operates on ready adapters only
+- it stages, probes, and then promotes
+- it writes current.json so status can read the result back truthfully`,
 		Example: `  kstoolchain sync
   kstoolchain sync --json`,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -166,8 +168,12 @@ sync engine lands.`,
 					return nil, nil, nil, contract.ExitValidation, contract.ArgsInvalid("sync takes no arguments.", "Run: kstoolchain sync")
 				})
 			}
-			return a.runCommand(func(_ *runtime.Context, _ *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
-				return nil, nil, nil, contract.ExitValidation, contract.NotImplemented("sync is scaffolded but not wired yet.", "Use kstoolchain version while the sync engine lands.")
+			return a.runCommand(func(_ *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
+				report, exitCode, appErr := svc.SyncReport()
+				if appErr != nil {
+					return nil, nil, nil, exitCode, appErr
+				}
+				return report, toolchain.RenderStatusText(report), nil, exitCode, nil
 			})
 		},
 	}
@@ -180,8 +186,10 @@ func (a *app) newStatusCmd() *cobra.Command {
 		Short: "Show managed tool status",
 		Long: `Show managed Keystone tool status.
 
-The command surface is scaffolded now so the status contract is visible before
-the status engine lands.`,
+Status is the live truth surface:
+- tracked inventory comes from the manifest
+- persisted tool state comes from current.json
+- PATH resolution decides what the shell will really run`,
 		Example: `  kstoolchain status
   kstoolchain status --json`,
 		RunE: func(_ *cobra.Command, args []string) error {

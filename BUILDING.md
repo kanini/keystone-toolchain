@@ -36,9 +36,15 @@ make test
 The scaffold is intentionally small:
 
 - `version` is wired and exposes build provenance
-- `status` is wired and reports manifest plus live PATH truth
-- `sync` exists as a scaffold command so the future surface is visible
+- `status` is wired and reports manifest truth, persisted state, and live PATH truth
+- `sync` is wired for the ready-set M1 path
 - contract, runtime, and CLI layers are already split
+
+Current sync scope:
+
+- `sync` operates on ready adapters only
+- today, `keystone-hub` is the only ready adapter
+- the ready-set sync path stages, probes, promotes, and writes `current.json`
 
 Managed tool installs will target:
 
@@ -47,8 +53,8 @@ Managed tool installs will target:
 ```
 
 Today, `status` will usually report `SHADOWED` on machines still running tools
-from `~/go/bin` or `~/bin`. That is expected until the sync engine takes over
-managed installs.
+from `~/go/bin` or `~/bin`. That is expected until the managed bin dir wins on
+PATH for the tool you are checking.
 
 ## Quality gates
 
@@ -59,3 +65,9 @@ Before adding sync logic, keep these green:
 3. `make test`
 4. `go test ./...`
 5. `kstoolchain version --json`
+
+For the current M1 sync slice, also keep these true:
+
+1. `kstoolchain sync` stages, probes, promotes, and writes `current.json`
+2. `kstoolchain status` reports truthful ready-set state after sync
+3. dirty ready repos fail closed without mutating the active binary

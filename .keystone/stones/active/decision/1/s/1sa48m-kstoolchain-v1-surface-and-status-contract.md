@@ -28,6 +28,14 @@ Repo-local implementation should inherit the reviewed Blueprint direction rather
 
 Upstream review loop exists in keystone-blueprint under wt5fqk, with 5 external review responses and a synthesis that converged on sync/status first, managed-bin isolation, explicit adapters, stage-probe-promote activation, live PATH audit, and fail-closed dirty policy in v1.
 
+Focused sync review 1/5 and 2/5 confirms the v1 contract is holding:
+- live PATH audit is already producing useful truth via SHADOWED
+- stage-probe-promote and persisted state still belong in M1
+- fail-closed dirty policy remains aligned with the trust posture
+- managed bin isolation and PATH truth remain non-negotiable
+
+The main open design choice is milestone width, not contract direction: keystone-hub-only first slice versus candidate repos through the same minimal flow.
+
 ## Journal
 
 ## Lessons

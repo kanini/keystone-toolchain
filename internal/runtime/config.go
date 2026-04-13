@@ -71,11 +71,11 @@ func LoadConfig(home string, opts GlobalOptions) (Config, string, *contract.AppE
 		cfg.StateDir = opts.StateDir
 	}
 
-	cfg.ManagedBinDir, err = normalizePath(cfg.ManagedBinDir, home)
+	cfg.ManagedBinDir, err = NormalizePath(cfg.ManagedBinDir, home)
 	if err != nil {
 		return Config{}, "", contract.Validation(contract.CodeConfigInvalid, "managed_bin_dir must be a valid path.", "Set managed_bin_dir to a usable path.", contract.Detail{Name: "managed_bin_dir", Value: cfg.ManagedBinDir})
 	}
-	cfg.StateDir, err = normalizePath(cfg.StateDir, home)
+	cfg.StateDir, err = NormalizePath(cfg.StateDir, home)
 	if err != nil {
 		return Config{}, "", contract.Validation(contract.CodeConfigInvalid, "state_dir must be a valid path.", "Set state_dir to a usable path.", contract.Detail{Name: "state_dir", Value: cfg.StateDir})
 	}
@@ -90,10 +90,10 @@ func resolveConfigPath(home, explicit string) (string, error) {
 	if strings.TrimSpace(explicit) == "" {
 		return filepath.Join(home, ".keystone", "toolchain", "config.yaml"), nil
 	}
-	return normalizePath(explicit, home)
+	return NormalizePath(explicit, home)
 }
 
-func normalizePath(rawPath, home string) (string, error) {
+func NormalizePath(rawPath, home string) (string, error) {
 	path := strings.TrimSpace(rawPath)
 	switch {
 	case path == "":

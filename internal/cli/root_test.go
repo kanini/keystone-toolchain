@@ -59,8 +59,8 @@ func TestCLIJSONPuritySuccess(t *testing.T) {
 	}
 }
 
-func TestCLIJSONFailureForScaffoldedSync(t *testing.T) {
-	res := runCLI(t, []string{"sync", "--json"})
+func TestCLISyncRejectsArgs(t *testing.T) {
+	res := runCLI(t, []string{"sync", "extra", "--json"})
 	if res.ExitCode != contract.ExitValidation {
 		t.Fatalf("unexpected exit code: got=%d want=%d\nstdout=%s\nstderr=%s", res.ExitCode, contract.ExitValidation, res.Stdout, res.Stderr)
 	}
@@ -73,7 +73,7 @@ func TestCLIJSONFailureForScaffoldedSync(t *testing.T) {
 		t.Fatalf("expected ok=false payload: %#v", payload)
 	}
 	errShape, _ := payload["error"].(map[string]any)
-	if code, _ := errShape["code"].(string); code != contract.CodeNotImplemented {
+	if code, _ := errShape["code"].(string); code != contract.CodeArgsInvalid {
 		t.Fatalf("unexpected error code: %#v", errShape)
 	}
 }
