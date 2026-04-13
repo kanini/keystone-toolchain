@@ -8,6 +8,13 @@
         "mcp",
         "serve"
       ]
+    },
+    "ksmem": {
+      "type": "stdio",
+      "command": "ksmem",
+      "args": [
+        "serve"
+      ]
     }
   }
 }
