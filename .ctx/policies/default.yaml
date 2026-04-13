@@ -1,0 +1,6 @@
+schema_version: 1
+name: default
+sensitive_scan:
+  mode: warn
+# Add always_include or slice_patterns only after you know which repo files
+# should always be present in every build.

@@ -1,0 +1,15 @@
+recipe_id: example-bootstrap
+task_kind: investigation
+objective: Customize this starter scaffold for the current repository
+constraints:
+  - Replace the starter entrypoints with real tracked paths from this repo
+  - Keep the first pass focused on .ctx authoring until entrypoints are tuned
+allowed_paths:
+  - .ctx/
+hints:
+  intent_path: .ctx/recipes/example/intent.md
+  seed_files:
+    - .ctx/entrypoints.yaml
+    - .ctx/policies/default.yaml
+budgets:
+  max_tokens: 6000

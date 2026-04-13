@@ -1,0 +1,4 @@
+# Add the tracked files or directories that define this repository.
+# Replace the empty list before relying on bot ask or entrypoint-based checks.
+schema_version: 1
+entrypoints: []

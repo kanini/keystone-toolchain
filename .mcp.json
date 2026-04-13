@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ksctx": {
+      "type": "stdio",
+      "command": "ksctx",
+      "args": [
+        "ctx",
+        "mcp",
+        "serve"
+      ]
+    }
+  }
+}

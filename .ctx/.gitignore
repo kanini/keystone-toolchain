@@ -1,0 +1,24 @@
+# ksctx: canonical .ctx/.gitignore
+# Purpose: keep `.ctx/` runtime artifacts out of VCS noise while allowing
+# versioned configuration to be committed.
+
+# Ignore everything under .ctx by default.
+*
+
+# Keep this file.
+!.gitignore
+
+# Allowlist versioned config.
+!entrypoints.yaml
+
+!intent/
+!intent/**
+
+!policies/
+!policies/**
+
+!recipes/
+!recipes/**
+
+!templates/
+!templates/**
