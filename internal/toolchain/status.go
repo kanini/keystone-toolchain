@@ -14,6 +14,9 @@ import (
 )
 
 const (
+	PersistedStateSchema = "kstoolchain.state/v1alpha1"
+	StatusReportSchema   = "kstoolchain.status/v1alpha1"
+
 	StateCurrent       = "CURRENT"
 	StateStaleLKG      = "STALE_LKG"
 	StateFailed        = "FAILED"
@@ -81,9 +84,9 @@ type OutputStatus struct {
 	Reason       string `json:"reason,omitempty"`
 }
 
-func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted PersistedState, stateFile string, stateFilePresent bool) StatusReport {
+func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted PersistedState, stateFile string, stateFilePresent bool, contractDrift bool) StatusReport {
 	report := StatusReport{
-		Schema:           "kstoolchain.status/v1alpha1",
+		Schema:           StatusReportSchema,
 		ManagedBinDir:    ctx.Config.ManagedBinDir,
 		StateFile:        stateFile,
 		StateFilePresent: stateFilePresent,
@@ -112,6 +115,9 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 
 		persistedRepo, hasPersisted := index[adapter.RepoID]
 		switch {
+		case contractDrift:
+			repoState.State = StateContractDrift
+			repoState.Reason = "persisted state managed_bin_dir does not match active configuration"
 		case !stateFilePresent:
 			repoState.State = StateUnknown
 			repoState.Reason = "no persisted toolchain state yet"
@@ -125,8 +131,19 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 			repoState.ActiveBuild = persistedRepo.ActiveBuild
 		}
 
-		if strings.EqualFold(adapter.Status, "blocked") && repoState.Reason == "" {
+		if adapter.Status == AdapterStatusBlocked && repoState.Reason == "" {
 			repoState.Reason = "adapter is blocked pending prerequisite work"
+		}
+		if adapter.Status == AdapterStatusReady {
+			if liveHead, ok := lookupRepoHead(adapter.RepoPath); ok {
+				repoState.RepoHead = liveHead
+				if repoState.State == StateCurrent && repoState.ActiveBuild != "" && liveHead != repoState.ActiveBuild {
+					repoState.State = StateStaleLKG
+					if repoState.Reason == "" {
+						repoState.Reason = fmt.Sprintf("repo HEAD %s is ahead of active build %s", shortValue(liveHead), shortValue(repoState.ActiveBuild))
+					}
+				}
+			}
 		}
 
 		for _, output := range adapter.ExpectedOutputs {
@@ -146,6 +163,7 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 
 			switch {
 			case item.ResolvedPath == "":
+				item.State = demoteMissingPathState(item.State)
 				if item.Reason == "" {
 					item.Reason = "tool is not on PATH"
 				}
@@ -162,8 +180,10 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 		repoState.State = deriveRepoState(repoState)
 		report.Repos = append(report.Repos, repoState)
 		report.Summary.RepoCount++
-		report.Summary.StateCounts[repoState.State]++
-		if strings.EqualFold(adapter.Status, "blocked") {
+		if adapter.Status == AdapterStatusReady {
+			report.Summary.StateCounts[repoState.State]++
+		}
+		if adapter.Status == AdapterStatusBlocked {
 			report.Summary.BlockedRepoCount++
 		}
 	}
@@ -172,21 +192,78 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 	return report
 }
 
-func LoadPersistedState(ctx *runtime.Context) (PersistedState, string, bool, *contract.AppError) {
+// LoadPersistedState reads current.json and returns the persisted state.
+// The five return values are: state, stateFile, present, contractDrift, err.
+// contractDrift=true means the file exists but its managed_bin_dir does not match
+// the active configuration — BuildStatusReport should surface CONTRACT_DRIFT.
+func LoadPersistedState(ctx *runtime.Context) (PersistedState, string, bool, bool, *contract.AppError) {
 	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
 	data, err := os.ReadFile(stateFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return PersistedState{}, stateFile, false, nil
+			return PersistedState{}, stateFile, false, false, nil
 		}
-		return PersistedState{}, stateFile, false, contract.Infra(contract.CodeIOError, "Could not read toolchain state file.", "Check file permissions and retry.", err, contract.Detail{Name: "path", Value: stateFile})
+		return PersistedState{}, stateFile, false, false, contract.Infra(contract.CodeIOError, "Could not read toolchain state file.", "Check file permissions and retry.", err, contract.Detail{Name: "path", Value: stateFile})
 	}
 
 	var persisted PersistedState
 	if err := json.Unmarshal(data, &persisted); err != nil {
-		return PersistedState{}, stateFile, true, contract.Validation(contract.CodeConfigInvalid, "Toolchain state file is not valid JSON.", "Fix or remove the state file.", contract.Detail{Name: "path", Value: stateFile})
+		return PersistedState{}, stateFile, true, false, contract.Validation(contract.CodeConfigInvalid, "Toolchain state file is not valid JSON.", "Fix or remove the state file.", contract.Detail{Name: "path", Value: stateFile})
 	}
-	return persisted, stateFile, true, nil
+	if appErr := validatePersistedStateShape(persisted); appErr != nil {
+		return PersistedState{}, stateFile, true, false, appErr
+	}
+	matchesConfig, appErr := persistedStateMatchesActiveConfig(ctx, persisted)
+	if appErr != nil {
+		return PersistedState{}, stateFile, true, false, appErr
+	}
+	if !matchesConfig {
+		// State file exists but was written for a different managed_bin_dir.
+		// Signal contract drift so BuildStatusReport can surface CONTRACT_DRIFT.
+		return PersistedState{}, stateFile, true, true, nil
+	}
+	return persisted, stateFile, true, false, nil
+}
+
+func SavePersistedState(ctx *runtime.Context, persisted PersistedState) (string, *contract.AppError) {
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		return "", contract.Infra(contract.CodeIOError, "Could not create toolchain state dir.", "Check permissions for the state dir and retry.", err, contract.Detail{Name: "path", Value: ctx.Config.StateDir})
+	}
+
+	persisted.Schema = PersistedStateSchema
+	persisted.ManagedBinDir = ctx.Config.ManagedBinDir
+	if appErr := validatePersistedStateShape(persisted); appErr != nil {
+		return "", appErr
+	}
+	if _, appErr := persistedStateMatchesActiveConfig(ctx, persisted); appErr != nil {
+		return "", appErr
+	}
+
+	tmpFile, err := os.CreateTemp(ctx.Config.StateDir, "current-*.tmp")
+	if err != nil {
+		return "", contract.Infra(contract.CodeIOError, "Could not create temp state file.", "Check permissions for the state dir and retry.", err, contract.Detail{Name: "path", Value: ctx.Config.StateDir})
+	}
+	tmpPath := tmpFile.Name()
+	enc := json.NewEncoder(tmpFile)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(persisted); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", contract.Infra(contract.CodeIOError, "Could not encode toolchain state file.", "Retry after fixing the state payload.", err, contract.Detail{Name: "path", Value: tmpPath})
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", contract.Infra(contract.CodeIOError, "Could not close temp state file.", "Retry after checking filesystem health.", err, contract.Detail{Name: "path", Value: tmpPath})
+	}
+
+	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
+	if err := os.Rename(tmpPath, stateFile); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", contract.Infra(contract.CodeIOError, "Could not atomically write toolchain state file.", "Check that the state dir is writable and retry.", err, contract.Detail{Name: "path", Value: stateFile})
+	}
+
+	return stateFile, nil
 }
 
 func RenderStatusText(report StatusReport) []string {
@@ -232,6 +309,26 @@ func StatusExitCode(report StatusReport) int {
 	return contract.ExitValidation
 }
 
+func SyncExitCode(manifest Manifest, persisted PersistedState) int {
+	if len(SelectReadyAdapters(manifest)) == 0 {
+		return contract.ExitValidation
+	}
+	index := map[string]PersistedRepoState{}
+	for _, repo := range persisted.Repos {
+		index[repo.RepoID] = repo
+	}
+	for _, adapter := range SelectReadyAdapters(manifest) {
+		repo, ok := index[adapter.RepoID]
+		if !ok {
+			return contract.ExitValidation
+		}
+		if normalizedState(repo.State) != StateCurrent {
+			return contract.ExitValidation
+		}
+	}
+	return contract.ExitOK
+}
+
 func normalizedState(raw string) string {
 	switch strings.TrimSpace(raw) {
 	case StateCurrent, StateStaleLKG, StateFailed, StateDirtySkipped, StateShadowed, StateContractDrift, StateUnknown:
@@ -243,22 +340,88 @@ func normalizedState(raw string) string {
 
 func deriveRepoState(repo RepoStatus) string {
 	state := normalizedState(repo.State)
-	if state == "" {
-		state = StateUnknown
-	}
 	for _, output := range repo.Outputs {
 		if output.State == StateShadowed {
 			return StateShadowed
+		}
+		if output.State == StateUnknown && (state == StateCurrent || state == StateStaleLKG) {
+			return StateUnknown
 		}
 	}
 	return state
 }
 
 func deriveOverall(counts map[string]int) string {
-	for _, state := range []string{StateShadowed, StateFailed, StateContractDrift, StateDirtySkipped, StateStaleLKG, StateUnknown} {
+	if len(counts) == 0 {
+		return StateUnknown
+	}
+	for _, state := range []string{StateFailed, StateShadowed, StateContractDrift, StateDirtySkipped, StateStaleLKG, StateUnknown} {
 		if counts[state] > 0 {
 			return state
 		}
 	}
 	return StateCurrent
+}
+
+func validatePersistedStateShape(persisted PersistedState) *contract.AppError {
+	if strings.TrimSpace(persisted.Schema) != PersistedStateSchema {
+		return contract.Validation(contract.CodeConfigInvalid, "Toolchain state schema is invalid.", "Remove or fix the state file.", contract.Detail{Name: "schema", Value: persisted.Schema})
+	}
+	if strings.TrimSpace(persisted.ManagedBinDir) == "" {
+		return contract.Validation(contract.CodeConfigInvalid, "Toolchain state managed_bin_dir is required.", "Remove or fix the state file.")
+	}
+	seen := map[string]struct{}{}
+	for _, repo := range persisted.Repos {
+		if strings.TrimSpace(repo.RepoID) == "" {
+			return contract.Validation(contract.CodeConfigInvalid, "Toolchain state repo_id is required.", "Remove or fix the state file.")
+		}
+		if normalizedState(repo.State) != repo.State {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s has an invalid state.", repo.RepoID), "Remove or fix the state file.", contract.Detail{Name: "state", Value: repo.State})
+		}
+		if _, ok := seen[repo.RepoID]; ok {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state duplicates repo_id %s.", repo.RepoID), "Remove or fix the state file.")
+		}
+		seen[repo.RepoID] = struct{}{}
+	}
+	return nil
+}
+
+func persistedStateMatchesActiveConfig(ctx *runtime.Context, persisted PersistedState) (bool, *contract.AppError) {
+	managedBinDir, err := runtime.NormalizePath(persisted.ManagedBinDir, ctx.HomeDir)
+	if err != nil {
+		return false, contract.Validation(contract.CodeConfigInvalid, "Toolchain state managed_bin_dir is invalid.", "Remove or fix the state file.", contract.Detail{Name: "managed_bin_dir", Value: persisted.ManagedBinDir})
+	}
+	if managedBinDir != ctx.Config.ManagedBinDir {
+		return false, nil
+	}
+	return true, nil
+}
+
+func demoteMissingPathState(current string) string {
+	switch current {
+	case StateCurrent, StateStaleLKG:
+		return StateUnknown
+	default:
+		return current
+	}
+}
+
+func lookupRepoHead(repoPath string) (string, bool) {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+func shortValue(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) > 7 {
+		return v[:7]
+	}
+	if v == "" {
+		return "unknown"
+	}
+	return v
 }

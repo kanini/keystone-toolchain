@@ -27,10 +27,32 @@ func (s *Service) StatusReport() (toolchain.StatusReport, int, *contract.AppErro
 	if appErr != nil {
 		return toolchain.StatusReport{}, contract.ExitValidation, appErr
 	}
-	persisted, stateFile, statePresent, appErr := toolchain.LoadPersistedState(s.ctx)
+	persisted, stateFile, statePresent, contractDrift, appErr := toolchain.LoadPersistedState(s.ctx)
 	if appErr != nil {
 		return toolchain.StatusReport{}, appErr.Exit, appErr
 	}
-	report := toolchain.BuildStatusReport(s.ctx, manifest, persisted, stateFile, statePresent)
+	report := toolchain.BuildStatusReport(s.ctx, manifest, persisted, stateFile, statePresent, contractDrift)
 	return report, toolchain.StatusExitCode(report), nil
+}
+
+func (s *Service) SyncReport() (toolchain.StatusReport, int, *contract.AppError) {
+	manifest, appErr := toolchain.LoadManifest(s.ctx)
+	if appErr != nil {
+		return toolchain.StatusReport{}, contract.ExitValidation, appErr
+	}
+	persisted, _, statePresent, _, appErr := toolchain.LoadPersistedState(s.ctx)
+	if appErr != nil {
+		return toolchain.StatusReport{}, appErr.Exit, appErr
+	}
+	if appErr := toolchain.SyncReadySet(s.ctx, manifest, persisted, statePresent); appErr != nil {
+		return toolchain.StatusReport{}, appErr.Exit, appErr
+	}
+	readyManifest := manifest
+	readyManifest.Repos = toolchain.SelectReadyAdapters(manifest)
+	persisted, stateFile, statePresent, contractDrift, appErr := toolchain.LoadPersistedState(s.ctx)
+	if appErr != nil {
+		return toolchain.StatusReport{}, appErr.Exit, appErr
+	}
+	report := toolchain.BuildStatusReport(s.ctx, readyManifest, persisted, stateFile, statePresent, contractDrift)
+	return report, toolchain.SyncExitCode(readyManifest, persisted), nil
 }

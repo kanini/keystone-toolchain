@@ -2,10 +2,12 @@ package toolchain
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kanini/keystone-toolchain/internal/contract"
 	"github.com/kanini/keystone-toolchain/internal/runtime"
 )
 
@@ -34,7 +36,7 @@ func TestBuildStatusReportWithoutStateMarksUnknown(t *testing.T) {
 		},
 	}
 
-	report := BuildStatusReport(ctx, manifest, PersistedState{}, filepath.Join(ctx.Config.StateDir, "current.json"), false)
+	report := BuildStatusReport(ctx, manifest, PersistedState{}, filepath.Join(ctx.Config.StateDir, "current.json"), false, false)
 	if report.Summary.Overall != StateUnknown {
 		t.Fatalf("unexpected overall state: %s", report.Summary.Overall)
 	}
@@ -75,7 +77,7 @@ func TestBuildStatusReportMarksShadowedPath(t *testing.T) {
 				ExpectedOutputs: []string{"ksmem"},
 				DirtyPolicy:     "fail_closed",
 				ReleaseUnit:     "repo",
-				Status:          "candidate",
+				Status:          AdapterStatusReady,
 			},
 		},
 	}
@@ -85,7 +87,7 @@ func TestBuildStatusReportMarksShadowedPath(t *testing.T) {
 		},
 	}
 
-	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true)
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
 	if report.Summary.Overall != StateShadowed {
 		t.Fatalf("unexpected overall state: %s", report.Summary.Overall)
 	}
@@ -95,6 +97,406 @@ func TestBuildStatusReportMarksShadowedPath(t *testing.T) {
 	}
 	if !strings.Contains(output.Reason, "PATH resolves") {
 		t.Fatalf("unexpected output reason: %q", output.Reason)
+	}
+}
+
+func TestBuildStatusReportIgnoresCandidateRepoInOverall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", "")
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        filepath.Join(home, "hub"),
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+			{
+				RepoID:          "keystone-memory",
+				RepoPath:        filepath.Join(home, "memory"),
+				ExpectedOutputs: []string{"ksmem"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusCandidate,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{RepoID: "keystone-hub", State: StateCurrent},
+		},
+	}
+
+	t.Setenv("PATH", ctx.Config.ManagedBinDir)
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write kshub: %v", err)
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Summary.Overall; got != StateCurrent {
+		t.Fatalf("unexpected overall state: %s", got)
+	}
+}
+
+func TestBuildStatusReportKeepsDirtySkippedWhenHeadMoves(t *testing.T) {
+	home := t.TempDir()
+
+	hubRepo := filepath.Join(home, "hub")
+	if err := os.MkdirAll(hubRepo, 0o755); err != nil {
+		t.Fatalf("mkdir hub repo: %v", err)
+	}
+	cmd := exec.Command("git", "init")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, string(out))
+	}
+	cmd = exec.Command("git", "config", "user.email", "test@example.com")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config email: %v\n%s", err, string(out))
+	}
+	cmd = exec.Command("git", "config", "user.name", "Test User")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config name: %v\n%s", err, string(out))
+	}
+	if err := os.WriteFile(filepath.Join(hubRepo, "README.md"), []byte("one\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	cmd = exec.Command("git", "add", "README.md")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, string(out))
+	}
+	cmd = exec.Command("git", "commit", "-m", "init")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, string(out))
+	}
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = hubRepo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git rev-parse: %v\n%s", err, string(out))
+	}
+	activeBuild := strings.TrimSpace(string(out))
+
+	if err := os.WriteFile(filepath.Join(hubRepo, "README.md"), []byte("two\n"), 0o644); err != nil {
+		t.Fatalf("write README second: %v", err)
+	}
+	cmd = exec.Command("git", "add", "README.md")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git add second: %v\n%s", err, string(out))
+	}
+	cmd = exec.Command("git", "commit", "-m", "second")
+	cmd.Dir = hubRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git commit second: %v\n%s", err, string(out))
+	}
+	if err := os.WriteFile(filepath.Join(hubRepo, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatalf("write dirty README: %v", err)
+	}
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        hubRepo,
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{RepoID: "keystone-hub", State: StateDirtySkipped, ActiveBuild: activeBuild, Reason: "repo has uncommitted changes; sync is fail_closed in v1"},
+		},
+	}
+
+	t.Setenv("PATH", "")
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateDirtySkipped {
+		t.Fatalf("unexpected repo state: %s", got)
+	}
+}
+
+func TestSyncExitCodeIgnoresShadowedReadyPath(t *testing.T) {
+	manifest := Manifest{
+		Repos: []RepoAdapter{
+			{RepoID: "keystone-hub", Status: AdapterStatusReady},
+			{RepoID: "keystone-memory", Status: AdapterStatusCandidate},
+		},
+	}
+	persisted := PersistedState{
+		Repos: []PersistedRepoState{
+			{RepoID: "keystone-hub", State: StateCurrent},
+		},
+	}
+	if got := SyncExitCode(manifest, persisted); got != contract.ExitOK {
+		t.Fatalf("unexpected exit code: %d", got)
+	}
+}
+
+func TestBuildStatusReportCurrentRequiresManagedPathResolution(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", "")
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        filepath.Join(home, "hub"),
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{RepoID: "keystone-hub", State: StateCurrent},
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateUnknown {
+		t.Fatalf("unexpected repo state: %s", got)
+	}
+	if got := report.Repos[0].Outputs[0].State; got != StateUnknown {
+		t.Fatalf("unexpected output state: %s", got)
+	}
+}
+
+func TestLoadPersistedStateRejectsWrongSchema(t *testing.T) {
+	home := t.TempDir()
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
+
+	if err := os.WriteFile(stateFile, []byte(`{"schema":"wrong","managed_bin_dir":"`+ctx.Config.ManagedBinDir+`","repos":[]}`), 0o644); err != nil {
+		t.Fatalf("write bad schema: %v", err)
+	}
+	if _, _, _, _, appErr := LoadPersistedState(ctx); appErr == nil {
+		t.Fatal("expected bad schema error")
+	}
+}
+
+func TestLoadPersistedStateManagedBinDirDriftReturnsContractDrift(t *testing.T) {
+	home := t.TempDir()
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
+	if err := os.WriteFile(stateFile, []byte(`{"schema":"`+PersistedStateSchema+`","managed_bin_dir":"`+filepath.Join(home, "other")+`","repos":[]}`), 0o644); err != nil {
+		t.Fatalf("write drifted managed bin dir: %v", err)
+	}
+	persisted, gotStateFile, present, contractDrift, appErr := LoadPersistedState(ctx)
+	if appErr != nil {
+		t.Fatalf("unexpected app error: %v", appErr)
+	}
+	if !present {
+		t.Fatal("expected present=true: state file exists even if config drifted")
+	}
+	if !contractDrift {
+		t.Fatal("expected contractDrift=true for managed_bin_dir mismatch")
+	}
+	if gotStateFile != stateFile {
+		t.Fatalf("unexpected state file path: %s", gotStateFile)
+	}
+	if len(persisted.Repos) != 0 {
+		t.Fatalf("expected empty persisted state, got %#v", persisted)
+	}
+}
+
+func TestStatusReportsContractDriftOnManagedBinMismatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", "")
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        filepath.Join(home, "hub"),
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	// State file written for a different managed_bin_dir — simulates a user
+	// who changed their managed_bin_dir config after a successful sync.
+	report := BuildStatusReport(ctx, manifest, PersistedState{}, filepath.Join(ctx.Config.StateDir, "current.json"), true, true)
+	if got := report.Summary.Overall; got != StateContractDrift {
+		t.Fatalf("expected CONTRACT_DRIFT overall, got %s", got)
+	}
+	if got := report.Repos[0].State; got != StateContractDrift {
+		t.Fatalf("expected CONTRACT_DRIFT repo state, got %s", got)
+	}
+	if report.Repos[0].Reason == "" {
+		t.Fatal("expected non-empty reason for CONTRACT_DRIFT")
+	}
+}
+
+func TestStatusHubReportsStaleWhenRepoHeadMoves(t *testing.T) {
+	home := t.TempDir()
+	hubRepo := filepath.Join(home, "hub")
+	if err := os.MkdirAll(hubRepo, 0o755); err != nil {
+		t.Fatalf("mkdir hub: %v", err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = hubRepo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, string(out))
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(hubRepo, "README.md"), []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit("add", "README.md")
+	runGit("commit", "-m", "first")
+
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = hubRepo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	activeBuild := strings.TrimSpace(string(out))
+
+	// Advance HEAD past the active build.
+	if err := os.WriteFile(filepath.Join(hubRepo, "README.md"), []byte("second\n"), 0o644); err != nil {
+		t.Fatalf("write second: %v", err)
+	}
+	runGit("add", "README.md")
+	runGit("commit", "-m", "second")
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        hubRepo,
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{RepoID: "keystone-hub", State: StateCurrent, ActiveBuild: activeBuild},
+		},
+	}
+
+	// Put a kshub binary in the managed bin dir so the output resolves correctly.
+	// Without this, demoteMissingPathState downgrades STALE_LKG → UNKNOWN.
+	// Prepend (don't replace) so lookupRepoHead can still find the git binary.
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir managed bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write kshub: %v", err)
+	}
+	t.Setenv("PATH", ctx.Config.ManagedBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateStaleLKG {
+		t.Fatalf("expected STALE_LKG when repo HEAD is ahead of active build, got %s", got)
+	}
+	if report.Repos[0].Reason == "" {
+		t.Fatal("expected non-empty reason for STALE_LKG")
+	}
+}
+
+func TestDeriveOverallRanksFAILEDAboveSHADOWED(t *testing.T) {
+	counts := map[string]int{
+		StateShadowed: 1,
+		StateFailed:   1,
+	}
+	if got := deriveOverall(counts); got != StateFailed {
+		t.Fatalf("expected FAILED to outrank SHADOWED, got %s", got)
 	}
 }
 
