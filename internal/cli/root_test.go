@@ -78,6 +78,26 @@ func TestCLIJSONFailureForScaffoldedSync(t *testing.T) {
 	}
 }
 
+func TestCLIStatusJSONReturnsReport(t *testing.T) {
+	t.Setenv("PATH", "")
+	res := runCLI(t, []string{"status", "--json"})
+	if res.ExitCode != contract.ExitValidation {
+		t.Fatalf("unexpected exit code: got=%d want=%d\nstdout=%s\nstderr=%s", res.ExitCode, contract.ExitValidation, res.Stdout, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stderr) != "" {
+		t.Fatalf("expected empty stderr, got %q", res.Stderr)
+	}
+
+	payload := decodeEnvelope(t, res.Stdout)
+	if ok, _ := payload["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true payload: %#v", payload)
+	}
+	result, _ := payload["result"].(map[string]any)
+	if schema, _ := result["schema"].(string); schema != "kstoolchain.status/v1alpha1" {
+		t.Fatalf("unexpected status schema: %#v", result)
+	}
+}
+
 func TestCLITextVersion(t *testing.T) {
 	res := runCLI(t, []string{"version"})
 	if res.ExitCode != contract.ExitOK {

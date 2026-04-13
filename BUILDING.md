@@ -36,8 +36,19 @@ make test
 The scaffold is intentionally small:
 
 - `version` is wired and exposes build provenance
-- `sync` and `status` exist as scaffold commands so the future surface is visible
+- `status` is wired and reports manifest plus live PATH truth
+- `sync` exists as a scaffold command so the future surface is visible
 - contract, runtime, and CLI layers are already split
+
+Managed tool installs will target:
+
+```text
+~/.keystone/toolchain/active/bin
+```
+
+Today, `status` will usually report `SHADOWED` on machines still running tools
+from `~/go/bin` or `~/bin`. That is expected until the sync engine takes over
+managed installs.
 
 ## Quality gates
 
@@ -48,4 +59,3 @@ Before adding sync logic, keep these green:
 3. `make test`
 4. `go test ./...`
 5. `kstoolchain version --json`
-

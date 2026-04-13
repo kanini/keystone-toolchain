@@ -30,8 +30,8 @@ type GlobalOptions struct {
 
 func LoadConfig(home string, opts GlobalOptions) (Config, string, *contract.AppError) {
 	cfg := Config{
-		ManagedBinDir: filepath.Join(home, ".keystone", "bin"),
-		StateDir:      filepath.Join(home, ".keystone", "toolchain"),
+		ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+		StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
 	}
 
 	configPath, err := resolveConfigPath(home, opts.ConfigPath)

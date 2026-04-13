@@ -15,10 +15,10 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.ManagedBinDir != filepath.Join(home, ".keystone", "bin") {
+	if cfg.ManagedBinDir != filepath.Join(home, ".keystone", "toolchain", "active", "bin") {
 		t.Fatalf("unexpected managed bin dir: %s", cfg.ManagedBinDir)
 	}
-	if cfg.StateDir != filepath.Join(home, ".keystone", "toolchain") {
+	if cfg.StateDir != filepath.Join(home, ".keystone", "toolchain", "state") {
 		t.Fatalf("unexpected state dir: %s", cfg.StateDir)
 	}
 	if cfgPath != filepath.Join(home, ".keystone", "toolchain", "config.yaml") {

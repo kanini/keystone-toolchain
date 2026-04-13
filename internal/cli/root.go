@@ -12,6 +12,7 @@ import (
 	"github.com/kanini/keystone-toolchain/internal/contract"
 	"github.com/kanini/keystone-toolchain/internal/runtime"
 	"github.com/kanini/keystone-toolchain/internal/service"
+	"github.com/kanini/keystone-toolchain/internal/toolchain"
 )
 
 type app struct {
@@ -189,8 +190,12 @@ the status engine lands.`,
 					return nil, nil, nil, contract.ExitValidation, contract.ArgsInvalid("status takes no arguments.", "Run: kstoolchain status")
 				})
 			}
-			return a.runCommand(func(_ *runtime.Context, _ *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
-				return nil, nil, nil, contract.ExitValidation, contract.NotImplemented("status is scaffolded but not wired yet.", "Use kstoolchain version while the status surface lands.")
+			return a.runCommand(func(_ *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
+				report, exitCode, appErr := svc.StatusReport()
+				if appErr != nil {
+					return nil, nil, nil, exitCode, appErr
+				}
+				return report, toolchain.RenderStatusText(report), nil, exitCode, nil
 			})
 		},
 	}

@@ -1,0 +1,107 @@
+schema: kstoolchain.adapter/v1alpha1
+managed_bin_dir: ~/.keystone/toolchain/active/bin
+repos:
+  - repo_id: keystone-memory
+    repo_path: /Users/rc/git/keystone-memory
+    install_cmd:
+      - make
+      - install
+      - INSTALL_BIN_DIR={{stage_bin}}
+    expected_outputs:
+      - ksmem
+    probe_cmd:
+      - "{{stage_bin}}/ksmem"
+      - --version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - Makefile supports INSTALL_BIN_DIR and exposes build provenance.
+
+  - repo_id: keystone-hub
+    repo_path: /Users/rc/git/keystone-hub
+    install_cmd:
+      - make
+      - install
+      - INSTALL_BIN_DIR={{stage_bin}}
+    expected_outputs:
+      - kshub
+    probe_cmd:
+      - "{{stage_bin}}/kshub"
+      - version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - Makefile supports INSTALL_BIN_DIR and exposes build provenance.
+      - This repo produced the stale-binary warning that kicked off the work.
+
+  - repo_id: keystone-hacker
+    repo_path: /Users/rc/git/keystone-hacker
+    install_cmd:
+      - make
+      - install
+      - INSTALL_BIN_DIR={{stage_bin}}
+    expected_outputs:
+      - kshack
+    probe_cmd:
+      - "{{stage_bin}}/kshack"
+      - --version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - Multi-module repo.
+
+  - repo_id: keystone-capture
+    repo_path: /Users/rc/git/keystone-capture
+    install_cmd:
+      - make
+      - install
+      - INSTALL_TARGET={{stage_bin}}/kscapture
+    expected_outputs:
+      - kscapture
+    probe_cmd:
+      - "{{stage_bin}}/kscapture"
+      - version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - Install is delegated through the repo's own CLI.
+
+  - repo_id: keystone-blueprint
+    repo_path: /Users/rc/git/keystone-blueprint
+    install_cmd:
+      - make
+      - install
+      - INSTALL_BIN_DIR={{stage_bin_parent}}
+    expected_outputs:
+      - ksblueprint
+    probe_cmd:
+      - "{{stage_bin}}/ksblueprint"
+      - version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - install-prompts stays outside the managed inventory.
+
+  - repo_id: keystone-context
+    repo_path: /Users/rc/git/keystone-context
+    install_cmd:
+      - make
+      - install
+      - INSTALL_DIR={{stage_bin}}
+    expected_outputs:
+      - ksctx
+      - ksctx-plugin-pg
+    probe_cmd:
+      - "{{stage_bin}}/ksctx"
+      - --version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: blocked
+    notes:
+      - Current install path links live repo scripts into the install dir.
+      - Needs immutable install mode before generic adoption.
