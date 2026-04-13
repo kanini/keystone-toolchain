@@ -1,0 +1,8 @@
+# Repo-local Keystone Hub config.
+# Add repo-specific backends, route overlays, and schema refs here when needed.
+
+mcp:
+  enabled: true
+
+requests:
+  default_project: "keystone-toolchain"
