@@ -53,13 +53,20 @@ func newApp(stdout, stderr io.Writer) *app {
 		Short: "Keystone toolchain sync and status CLI",
 		Long: `kstoolchain keeps Keystone tools current and truthful.
 
+The first release surface is small on purpose:
+- version reports build provenance
+- status will report managed tool truth
+- sync will refresh managed tools into the Keystone bin dir
+
 The scaffold already carries the load-bearing CLI pieces:
 - build provenance
 - contract-first output
 - config and runtime context
-- install and staleness checks
-
-The sync engine lands on top of this spine.`,
+- install and staleness checks`,
+		Example: `  kstoolchain version
+  kstoolchain version --json
+  kstoolchain status
+  kstoolchain sync`,
 		Version:       contract.VersionString(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -122,6 +129,11 @@ func (a *app) newVersionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print version and build provenance",
+		Long: `Print kstoolchain version and build provenance.
+
+Text mode is for people. JSON mode is for tools and agents.`,
+		Example: `  kstoolchain version
+  kstoolchain version --json`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) != 0 {
 				return a.runCommand(func(_ *runtime.Context, _ *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
@@ -141,6 +153,12 @@ func (a *app) newSyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync managed Keystone tools",
+		Long: `Sync managed Keystone tools into the configured Keystone bin dir.
+
+The command surface is scaffolded now so the tool shape is visible before the
+sync engine lands.`,
+		Example: `  kstoolchain sync
+  kstoolchain sync --json`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) != 0 {
 				return a.runCommand(func(_ *runtime.Context, _ *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
@@ -159,6 +177,12 @@ func (a *app) newStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show managed tool status",
+		Long: `Show managed Keystone tool status.
+
+The command surface is scaffolded now so the status contract is visible before
+the status engine lands.`,
+		Example: `  kstoolchain status
+  kstoolchain status --json`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) != 0 {
 				return a.runCommand(func(_ *runtime.Context, _ *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {

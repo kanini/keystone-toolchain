@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          files="$(find . -name '*.go' -type f | sort)"
+          test -n "$files"
+          test -z "$(gofmt -l $files)"
+
+      - name: Check diff hygiene
+        run: git diff --check
+
+      - name: Go test
+        run: go test ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: make build
+
+      - name: Install
+        run: make install
+
+      - name: Check installed binary
+        shell: bash
+        run: |
+          "$(go env GOPATH)/bin/kstoolchain" version --json
