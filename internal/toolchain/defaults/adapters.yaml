@@ -115,7 +115,7 @@ repos:
     release_unit: repo
     status: ready
     notes:
-      - build also produces install-prompts and kssignal to stage dir; only ksblueprint is promoted.
+      - build also produces install-prompts to stage dir; only ksblueprint is promoted.
 
   - repo_id: keystone-context
     repo_path: /Users/rc/git/keystone-context
