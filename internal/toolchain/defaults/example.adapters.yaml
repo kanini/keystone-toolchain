@@ -1,0 +1,60 @@
+# kstoolchain adapter manifest — example
+#
+# Copy this file to ~/.keystone/toolchain/adapters.yaml and edit the
+# repo_path values to match your local checkout locations.
+#
+# kstoolchain looks for a config file at ~/.keystone/toolchain/config.yaml.
+# Set adapters_file there to point at your copy:
+#
+#   adapters_file: ~/.keystone/toolchain/adapters.yaml
+#
+# Or pass it directly:
+#
+#   kstoolchain sync --adapters ~/.keystone/toolchain/adapters.yaml
+#
+# Adapter status values:
+#   ready     — eligible for sync; kstoolchain will build and promote this tool
+#   candidate — tracked in status output but not synced yet
+#   blocked   — excluded from sync; a prerequisite must land first
+#
+# Template variables in install_cmd and probe_cmd:
+#   {{stage_bin}}        — temporary staging dir for this sync run
+#   {{stage_bin_parent}} — parent of the staging dir (for tools that install
+#                          into a parent and name their own subdirectory)
+
+schema: kstoolchain.adapter/v1alpha1
+managed_bin_dir: ~/.keystone/toolchain/active/bin
+repos:
+  - repo_id: my-tool
+    repo_path: ~/git/my-tool          # absolute or ~ path to the repo on disk
+    install_cmd:
+      - make
+      - build-local
+      - BIN_DIR={{stage_bin}}         # build into the staging dir, not go/bin
+    expected_outputs:
+      - my-tool                       # binary name(s) the build must produce
+    probe_cmd:
+      - "{{stage_bin}}/my-tool"
+      - --version                     # must exit 0 to pass the probe gate
+    dirty_policy: fail_closed         # fail_closed: dirty repo blocks sync
+    release_unit: repo                # repo: all outputs promote together
+    status: ready
+    notes:
+      - Replace this with your own tool.
+
+  - repo_id: another-tool
+    repo_path: ~/git/another-tool
+    install_cmd:
+      - make
+      - build-local
+      - BIN_DIR={{stage_bin}}
+    expected_outputs:
+      - another-tool
+    probe_cmd:
+      - "{{stage_bin}}/another-tool"
+      - version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate                 # not synced yet; visible in status output
+    notes:
+      - Promote to ready when the build surface is verified.
