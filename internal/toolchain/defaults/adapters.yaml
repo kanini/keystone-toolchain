@@ -51,9 +51,7 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
-    notes:
-      - Not yet verified for managed sync.
+    status: ready
 
   - repo_id: keystone-sentinal
     repo_path: /Users/rc/git/keystone-sentinal
@@ -68,16 +66,14 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
-    notes:
-      - Not yet verified for managed sync.
+    status: ready
 
   - repo_id: keystone-hacker
     repo_path: /Users/rc/git/keystone-hacker
     install_cmd:
       - make
-      - install
-      - INSTALL_BIN_DIR={{stage_bin}}
+      - build
+      - BIN_DIR={{stage_bin}}
     expected_outputs:
       - kshack
     probe_cmd:
@@ -85,7 +81,7 @@ repos:
       - --version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
+    status: ready
     notes:
       - Multi-module repo.
 
@@ -93,8 +89,8 @@ repos:
     repo_path: /Users/rc/git/keystone-capture
     install_cmd:
       - make
-      - install
-      - INSTALL_TARGET={{stage_bin}}/kscapture
+      - build
+      - BIN_DIR={{stage_bin}}
     expected_outputs:
       - kscapture
     probe_cmd:
@@ -102,16 +98,14 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
-    notes:
-      - Install is delegated through the repo's own CLI.
+    status: ready
 
   - repo_id: keystone-blueprint
     repo_path: /Users/rc/git/keystone-blueprint
     install_cmd:
       - make
-      - install
-      - INSTALL_BIN_DIR={{stage_bin_parent}}
+      - build
+      - BIN_DIR={{stage_bin}}
     expected_outputs:
       - ksblueprint
     probe_cmd:
@@ -119,9 +113,9 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
+    status: ready
     notes:
-      - install-prompts stays outside the managed inventory.
+      - build also produces install-prompts and kssignal to stage dir; only ksblueprint is promoted.
 
   - repo_id: keystone-context
     repo_path: /Users/rc/git/keystone-context
