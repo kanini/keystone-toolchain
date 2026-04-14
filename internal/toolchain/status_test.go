@@ -529,7 +529,95 @@ func TestRenderStatusTextIncludesSummary(t *testing.T) {
 	if !strings.Contains(joined, "Suite: UNKNOWN") {
 		t.Fatalf("unexpected text: %s", joined)
 	}
-	if !strings.Contains(joined, "keystone-memory  UNKNOWN") {
+	if !strings.Contains(joined, "keystone-memory  adapter=candidate  state=UNKNOWN") {
 		t.Fatalf("unexpected text: %s", joined)
+	}
+	if strings.Contains(joined, "output ksmem") {
+		t.Fatalf("non-ready adapter output section should be suppressed in text render: %s", joined)
+	}
+}
+
+func TestBuildStatusReportCandidateNotShadowedWhenBinaryOnPath(t *testing.T) {
+	home := t.TempDir()
+	pathDir := filepath.Join(home, "path-bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pathDir, "ksmem"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write ksmem: %v", err)
+	}
+	t.Setenv("PATH", pathDir)
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-memory",
+				RepoPath:        filepath.Join(home, "memory"),
+				ExpectedOutputs: []string{"ksmem"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusCandidate,
+			},
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, PersistedState{}, filepath.Join(ctx.Config.StateDir, "current.json"), false, false)
+	if got := report.Repos[0].State; got != StateUnknown {
+		t.Fatalf("candidate adapter with binary on PATH should be UNKNOWN not %s", got)
+	}
+	if report.Repos[0].Outputs[0].ResolvedPath != "" {
+		t.Fatalf("candidate adapter output should have no resolved_path")
+	}
+	if report.Summary.OutputCount != 0 {
+		t.Fatalf("managed output count should be 0 for candidate-only suite, got %d", report.Summary.OutputCount)
+	}
+}
+
+func TestBuildStatusReportDemotedAdapterDoesNotShowPersistedState(t *testing.T) {
+	// If an adapter previously had state=CURRENT in persisted state but has since
+	// been demoted to candidate, it must show UNKNOWN, not CURRENT.
+	home := t.TempDir()
+	t.Setenv("PATH", "")
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-memory",
+				RepoPath:        filepath.Join(home, "memory"),
+				ExpectedOutputs: []string{"ksmem"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusCandidate, // demoted
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{RepoID: "keystone-memory", State: StateCurrent}, // stale
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateUnknown {
+		t.Fatalf("demoted adapter with stale CURRENT persisted state should be UNKNOWN, got %s", got)
 	}
 }

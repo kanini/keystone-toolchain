@@ -113,26 +113,35 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 			Notes:         append([]string{}, adapter.Notes...),
 		}
 
-		persistedRepo, hasPersisted := index[adapter.RepoID]
-		switch {
-		case contractDrift:
-			repoState.State = StateContractDrift
-			repoState.Reason = "persisted state managed_bin_dir does not match active configuration"
-		case !stateFilePresent:
+		// Non-ready adapters are not in the managed sync scope. Skip the
+		// persisted-state lookup entirely — any stale state from a previous
+		// ready-set sync (e.g., if the adapter was demoted from ready to candidate)
+		// would be misleading here.
+		if adapter.Status != AdapterStatusReady {
 			repoState.State = StateUnknown
-			repoState.Reason = "no persisted toolchain state yet"
-		case !hasPersisted:
-			repoState.State = StateUnknown
-			repoState.Reason = "repo missing from persisted toolchain state"
-		default:
-			repoState.State = normalizedState(persistedRepo.State)
-			repoState.Reason = persistedRepo.Reason
-			repoState.RepoHead = persistedRepo.RepoHead
-			repoState.ActiveBuild = persistedRepo.ActiveBuild
-		}
-
-		if adapter.Status == AdapterStatusBlocked && repoState.Reason == "" {
-			repoState.Reason = "adapter is blocked pending prerequisite work"
+			if adapter.Status == AdapterStatusBlocked {
+				repoState.Reason = "adapter is blocked pending prerequisite work"
+			} else {
+				repoState.Reason = "adapter is not in the managed sync scope"
+			}
+		} else {
+			persistedRepo, hasPersisted := index[adapter.RepoID]
+			switch {
+			case contractDrift:
+				repoState.State = StateContractDrift
+				repoState.Reason = "persisted state managed_bin_dir does not match active configuration"
+			case !stateFilePresent:
+				repoState.State = StateUnknown
+				repoState.Reason = "no persisted toolchain state yet"
+			case !hasPersisted:
+				repoState.State = StateUnknown
+				repoState.Reason = "repo missing from persisted toolchain state"
+			default:
+				repoState.State = normalizedState(persistedRepo.State)
+				repoState.Reason = persistedRepo.Reason
+				repoState.RepoHead = persistedRepo.RepoHead
+				repoState.ActiveBuild = persistedRepo.ActiveBuild
+			}
 		}
 		if adapter.Status == AdapterStatusReady {
 			if liveHead, ok := lookupRepoHead(adapter.RepoPath); ok {
@@ -156,25 +165,32 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 				item.State = StateUnknown
 			}
 
-			resolved, err := exec.LookPath(output)
-			if err == nil {
-				item.ResolvedPath = resolved
-			}
-
-			switch {
-			case item.ResolvedPath == "":
-				item.State = demoteMissingPathState(item.State)
-				if item.Reason == "" {
-					item.Reason = "tool is not on PATH"
+			// PATH resolution is only meaningful for ready adapters that have an
+			// actual managed binary. For candidate and blocked adapters there is no
+			// managed-binary referent yet, so SHADOWED would be semantically wrong.
+			if adapter.Status == AdapterStatusReady {
+				resolved, err := exec.LookPath(output)
+				if err == nil {
+					item.ResolvedPath = resolved
 				}
-			case item.ResolvedPath != item.ExpectedPath:
-				item.State = StateShadowed
-				item.Reason = fmt.Sprintf("PATH resolves %s instead of %s", item.ResolvedPath, item.ExpectedPath)
-			case item.State == StateUnknown && stateFilePresent:
-				item.Reason = "managed path resolves correctly but persisted repo state is unknown"
+
+				switch {
+				case item.ResolvedPath == "":
+					item.State = demoteMissingPathState(item.State)
+					if item.Reason == "" {
+						item.Reason = "tool is not on PATH"
+					}
+				case item.ResolvedPath != item.ExpectedPath:
+					item.State = StateShadowed
+					item.Reason = fmt.Sprintf("PATH resolves %s instead of %s", item.ResolvedPath, item.ExpectedPath)
+				case item.State == StateUnknown && stateFilePresent:
+					item.Reason = "managed path resolves correctly but persisted repo state is unknown"
+				}
 			}
 			repoState.Outputs = append(repoState.Outputs, item)
-			report.Summary.OutputCount++
+			if adapter.Status == AdapterStatusReady {
+				report.Summary.OutputCount++
+			}
 		}
 
 		repoState.State = deriveRepoState(repoState)
@@ -278,23 +294,27 @@ func RenderStatusText(report StatusReport) []string {
 	if report.LastSuccessAt != "" {
 		lines = append(lines, fmt.Sprintf("Last success: %s", report.LastSuccessAt))
 	}
-	lines = append(lines, fmt.Sprintf("Repos: %d | Outputs: %d | Blocked adapters: %d", report.Summary.RepoCount, report.Summary.OutputCount, report.Summary.BlockedRepoCount))
+	lines = append(lines, fmt.Sprintf("Repos: %d | Managed outputs: %d | Blocked adapters: %d", report.Summary.RepoCount, report.Summary.OutputCount, report.Summary.BlockedRepoCount))
 
 	for _, repo := range report.Repos {
-		lines = append(lines, fmt.Sprintf("%s  %s  adapter=%s", repo.RepoID, repo.State, repo.AdapterStatus))
-		if repo.Reason != "" {
+		lines = append(lines, fmt.Sprintf("%s  adapter=%s  state=%s", repo.RepoID, repo.AdapterStatus, repo.State))
+		if repo.AdapterStatus != AdapterStatusReady {
+			lines = append(lines, "  not in sync scope for managed-bin evaluation")
+		} else if repo.Reason != "" {
 			lines = append(lines, fmt.Sprintf("  reason: %s", repo.Reason))
 		}
 		lines = append(lines, fmt.Sprintf("  repo: %s", repo.RepoPath))
-		for _, output := range repo.Outputs {
-			line := fmt.Sprintf("  output %s  %s", output.Name, output.State)
-			lines = append(lines, line)
-			lines = append(lines, fmt.Sprintf("    expected: %s", output.ExpectedPath))
-			if output.ResolvedPath != "" {
-				lines = append(lines, fmt.Sprintf("    resolved: %s", output.ResolvedPath))
-			}
-			if output.Reason != "" {
-				lines = append(lines, fmt.Sprintf("    reason: %s", output.Reason))
+		if repo.AdapterStatus == AdapterStatusReady {
+			for _, output := range repo.Outputs {
+				line := fmt.Sprintf("  output %s  %s", output.Name, output.State)
+				lines = append(lines, line)
+				lines = append(lines, fmt.Sprintf("    expected: %s", output.ExpectedPath))
+				if output.ResolvedPath != "" {
+					lines = append(lines, fmt.Sprintf("    resolved: %s", output.ResolvedPath))
+				}
+				if output.Reason != "" {
+					lines = append(lines, fmt.Sprintf("    reason: %s", output.Reason))
+				}
 			}
 		}
 	}
