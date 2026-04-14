@@ -121,8 +121,8 @@ repos:
     repo_path: /Users/rc/git/keystone-context
     install_cmd:
       - make
-      - install
-      - INSTALL_DIR={{stage_bin}}
+      - build-local
+      - BIN_DIR={{stage_bin}}
     expected_outputs:
       - ksctx
       - ksctx-plugin-pg
@@ -131,7 +131,7 @@ repos:
       - --version
     dirty_policy: fail_closed
     release_unit: repo
-    status: blocked
+    status: ready
     notes:
-      - Current install path links live repo scripts into the install dir.
-      - Needs immutable install mode before generic adoption.
+      - Bundles ksctx.js and ksctx-plugin-pg.js to ~/.keystone/ksctx/ then installs shell launchers to stage_bin.
+      - Requires bun on PATH at launcher runtime; no node_modules needed.
