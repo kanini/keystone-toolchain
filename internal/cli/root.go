@@ -175,7 +175,7 @@ Sync is intentionally narrow in v1:
 				}
 				lines := toolchain.RenderStatusText(report)
 				if exitCode == contract.ExitOK {
-					lines = append(lines, "Hint: Open a new shell or run `source ~/.zshrc` to pick up the updated tools.")
+					lines = append(lines, "Hint: Open a new shell to pick up the updated tools.")
 				}
 				return report, lines, nil, exitCode, nil
 			})
