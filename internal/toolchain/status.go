@@ -298,9 +298,7 @@ func RenderStatusText(report StatusReport) []string {
 
 	for _, repo := range report.Repos {
 		lines = append(lines, fmt.Sprintf("%s  adapter=%s  state=%s", repo.RepoID, repo.AdapterStatus, repo.State))
-		if repo.AdapterStatus != AdapterStatusReady {
-			lines = append(lines, "  not in sync scope for managed-bin evaluation")
-		} else if repo.Reason != "" {
+		if repo.Reason != "" {
 			lines = append(lines, fmt.Sprintf("  reason: %s", repo.Reason))
 		}
 		lines = append(lines, fmt.Sprintf("  repo: %s", repo.RepoPath))

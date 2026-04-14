@@ -5,8 +5,8 @@ repos:
     repo_path: /Users/rc/git/keystone-memory
     install_cmd:
       - make
-      - install
-      - INSTALL_BIN_DIR={{stage_bin}}
+      - build-local
+      - BIN_DIR={{stage_bin}}
     expected_outputs:
       - ksmem
     probe_cmd:
@@ -14,9 +14,10 @@ repos:
       - --version
     dirty_policy: fail_closed
     release_unit: repo
-    status: candidate
+    status: ready
     notes:
-      - Makefile supports INSTALL_BIN_DIR and exposes build provenance.
+      - Uses staged build output through make build-local BIN_DIR=...
+      - build-local added to Makefile to match the hub adapter pattern.
 
   - repo_id: keystone-hub
     repo_path: /Users/rc/git/keystone-hub
