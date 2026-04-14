@@ -38,6 +38,40 @@ repos:
       - Uses staged build output through make build-local BIN_DIR=...
       - This repo produced the stale-binary warning that kicked off the work.
 
+  - repo_id: keystone-signal
+    repo_path: /Users/rc/git/keystone-signal
+    install_cmd:
+      - make
+      - build
+      - BIN_DIR={{stage_bin}}
+    expected_outputs:
+      - kssignal
+    probe_cmd:
+      - "{{stage_bin}}/kssignal"
+      - version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - Not yet verified for managed sync.
+
+  - repo_id: keystone-sentinal
+    repo_path: /Users/rc/git/keystone-sentinal
+    install_cmd:
+      - make
+      - build
+      - BIN_DIR={{stage_bin}}
+    expected_outputs:
+      - kssentinal
+    probe_cmd:
+      - "{{stage_bin}}/kssentinal"
+      - version
+    dirty_policy: fail_closed
+    release_unit: repo
+    status: candidate
+    notes:
+      - Not yet verified for managed sync.
+
   - repo_id: keystone-hacker
     repo_path: /Users/rc/git/keystone-hacker
     install_cmd:
