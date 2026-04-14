@@ -2,13 +2,14 @@
 schema: v1
 id: f2hqgw
 title: Implement keystone-hub sync M1 through ready-adapter path
-status: in_progress
+status: closed
 type: task
 priority: p1
 deps: [1sa48m, kfj483]
 return_to: 8jpmde
 tags: [hub, sync, tdd]
 created_at: "2026-04-13T04:06:55Z"
+closed_at: "2026-04-13T17:08:06Z"
 ---
 <!-- ksmem:managed: direct edits bypass validation; use ksmem commands -->
 Implement the first real sync slice for kstoolchain by proving one truthful end-to-end path: keystone-hub only, through the generic ready-adapter flow.
@@ -90,4 +91,8 @@ Regression intent: managed_bin_dir drift is now treated as stale persisted state
 
 ## Journal
 
+- 2026-04-13T17:08:06Z | Code on main. All regression checks passed (go test ./..., make test, go vet, git diff --check). Dogfood artifact bundle saved under .keystone/local/dogfood/sync-m1-hub/. Three post-dogfood regressions fixed: sync exit code based on ready-set outcome not PATH state, cross-filesystem promotion fallback, DIRTY_SKIPPED persists when HEAD moves. Managed-bin reconfiguration drift treated as stale state rather than fatal error. Follow-up filed as sdz8vc.
+
 ## Lessons
+
+- Dogfood on the real machine with a temp config exposed issues that tests missed: the exit-code/PATH coupling, cross-filesystem rename, and dirty-skip drift. Run dogfood before marking M1 complete, not after.

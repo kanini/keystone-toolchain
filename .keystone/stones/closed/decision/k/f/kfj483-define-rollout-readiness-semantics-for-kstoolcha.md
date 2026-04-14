@@ -2,12 +2,13 @@
 schema: v1
 id: kfj483
 title: Define rollout readiness semantics for kstoolchain sync
-status: open
+status: closed
 type: decision
 priority: p1
 deps: [1sa48m]
 tags: [adapters, review-loop, sync]
 created_at: "2026-04-13T04:06:44Z"
+closed_at: "2026-04-14T02:33:29Z"
 ---
 <!-- ksmem:managed: direct edits bypass validation; use ksmem commands -->
 Derived from the completed 8jpmde sync M1 review round.
@@ -45,5 +46,7 @@ M1 should mark only keystone-hub ready.
 This decision is derived from the 8jpmde focused review round, especially the final synthesis and GPT Pro recommendation to keep status broad and sync narrow through a ready-adapter path.
 
 ## Journal
+
+- 2026-04-14T02:33:29Z | Rollout semantics (ready/candidate/blocked) are live in the manifest, sync operates on ready set only, status renders full inventory. Implemented and proven through M1 dogfood and memory adapter addition.
 
 ## Lessons
