@@ -126,6 +126,8 @@ repos:
     expected_outputs:
       - ksctx
       - ksctx-plugin-pg
+    support_artifacts:
+      - .ksctx-runtime
     probe_cmd:
       - "{{stage_bin}}/ksctx"
       - --version
@@ -133,5 +135,5 @@ repos:
     release_unit: repo
     status: ready
     notes:
-      - Bundles ksctx.js and ksctx-plugin-pg.js to ~/.keystone/ksctx/ then installs shell launchers to stage_bin.
-      - Requires bun on PATH at launcher runtime; no node_modules needed.
+      - build-local emits ksctx, ksctx-plugin-pg, and .ksctx-runtime under BIN_DIR.
+      - Promotion must keep the hidden runtime directory with the launcher files as one release unit.

@@ -50,3 +50,5 @@ This decision is derived from the 8jpmde focused review round, especially the fi
 - 2026-04-14T02:33:29Z | Rollout semantics (ready/candidate/blocked) are live in the manifest, sync operates on ready set only, status renders full inventory. Implemented and proven through M1 dogfood and memory adapter addition.
 
 ## Lessons
+
+- Keep `status` broad and `sync` narrow by expressing rollout readiness in the manifest instead of hard-coding repo scope in Go.

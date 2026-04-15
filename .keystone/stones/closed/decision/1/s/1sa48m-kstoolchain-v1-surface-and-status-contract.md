@@ -42,3 +42,5 @@ The main open design choice is milestone width, not contract direction: keystone
 - 2026-04-14T02:33:29Z | Upstream Blueprint design contract is fully mirrored in the implementation. Stage-probe-promote, managed-bin isolation, PATH audit, fail-closed dirty policy — all live in the code.
 
 ## Lessons
+
+- Mirror reviewed upstream design contracts into the local repo before widening implementation; it keeps later slices bounded and reviewable.

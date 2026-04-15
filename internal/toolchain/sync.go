@@ -97,9 +97,10 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 		return repoState
 	}
 
-	for _, output := range adapter.ExpectedOutputs {
-		if _, err := os.Stat(filepath.Join(stageBin, output)); err != nil {
-			applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("expected staged output %s is missing", output)))
+	artifacts := promotedArtifacts(adapter)
+	for _, artifact := range artifacts {
+		if _, err := os.Stat(filepath.Join(stageBin, artifact)); err != nil {
+			applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("expected staged artifact %s is missing", artifact)))
 			return repoState
 		}
 	}
@@ -118,11 +119,11 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 		applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not create managed bin dir: %v", err)))
 		return repoState
 	}
-	for _, output := range adapter.ExpectedOutputs {
-		source := filepath.Join(stageBin, output)
-		target := filepath.Join(ctx.Config.ManagedBinDir, output)
-		if err := promoteFile(source, target, os.Rename); err != nil {
-			applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not promote %s: %v", output, err)))
+	for _, artifact := range artifacts {
+		source := filepath.Join(stageBin, artifact)
+		target := filepath.Join(ctx.Config.ManagedBinDir, artifact)
+		if err := promotePath(source, target, os.Rename); err != nil {
+			applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not promote %s: %v", artifact, err)))
 			return repoState
 		}
 	}
@@ -186,16 +187,22 @@ func truncateReason(reason string) string {
 	return strings.TrimSpace(reason[:197]) + "..."
 }
 
-func promoteFile(source, target string, renameFn func(string, string) error) error {
-	if err := renameFn(source, target); err == nil {
-		return nil
-	} else if !errors.Is(err, syscall.EXDEV) {
-		return err
-	}
-
+func promotePath(source, target string, renameFn func(string, string) error) error {
 	info, err := os.Stat(source)
 	if err != nil {
 		return err
+	}
+	if err := renameFn(source, target); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		if !info.IsDir() || !existingNonEmptyTarget(target) {
+			return err
+		}
+		return promoteDirectory(source, target, info.Mode(), renameFn)
+	}
+
+	if info.IsDir() {
+		return promoteDirectory(source, target, info.Mode(), renameFn)
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
@@ -223,6 +230,11 @@ func promoteFile(source, target string, renameFn func(string, string) error) err
 		_ = tmpFile.Close()
 		return err
 	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = sourceFile.Close()
+		_ = tmpFile.Close()
+		return err
+	}
 	if err := sourceFile.Close(); err != nil {
 		_ = tmpFile.Close()
 		return err
@@ -236,9 +248,124 @@ func promoteFile(source, target string, renameFn func(string, string) error) err
 	if err := os.Rename(tmpPath, target); err != nil {
 		return err
 	}
-	if err := os.Remove(source); err != nil {
-		return err
-	}
+	_ = os.Remove(source)
 	cleanup = false
 	return nil
+}
+
+func promoteDirectory(source, target string, mode os.FileMode, renameFn func(string, string) error) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+
+	targetExists := false
+	if _, err := os.Stat(target); err == nil {
+		targetExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if !targetExists {
+		if err := renameFn(source, target); err == nil {
+			return nil
+		} else if !errors.Is(err, syscall.EXDEV) {
+			return err
+		}
+	}
+
+	tmpDir, err := os.MkdirTemp(filepath.Dir(target), filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
+
+	if err := os.Chmod(tmpDir, mode); err != nil {
+		return err
+	}
+	if err := copyDirectory(source, tmpDir); err != nil {
+		return err
+	}
+
+	backupPath := ""
+	if targetExists {
+		backupPath = filepath.Join(filepath.Dir(target), filepath.Base(target)+".bak-"+filepath.Base(tmpDir))
+		if err := os.RemoveAll(backupPath); err != nil {
+			return err
+		}
+		if err := renameFn(target, backupPath); err != nil {
+			return err
+		}
+		defer func() {
+			if backupPath != "" {
+				_ = renameFn(backupPath, target)
+			}
+		}()
+	}
+
+	if err := renameFn(tmpDir, target); err != nil {
+		return err
+	}
+	committedBackup := backupPath
+	backupPath = ""
+	cleanupTmp = false
+	_ = os.RemoveAll(source)
+	if committedBackup != "" {
+		_ = os.RemoveAll(committedBackup)
+	}
+	return nil
+}
+
+func existingNonEmptyTarget(target string) bool {
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return false
+	}
+	return len(entries) > 0
+}
+
+func copyDirectory(source, target string) error {
+	return filepath.Walk(source, func(current string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(source, current)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		destination := filepath.Join(target, rel)
+		if info.IsDir() {
+			return os.MkdirAll(destination, info.Mode())
+		}
+
+		sourceFile, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		defer sourceFile.Close()
+
+		targetFile, err := os.OpenFile(destination, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(targetFile, sourceFile); err != nil {
+			_ = targetFile.Close()
+			return err
+		}
+		if err := targetFile.Close(); err != nil {
+			return err
+		}
+		return nil
+	})
 }

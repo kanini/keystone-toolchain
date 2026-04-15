@@ -3,6 +3,7 @@ package toolchain
 import (
 	_ "embed"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -31,16 +32,20 @@ type Manifest struct {
 }
 
 type RepoAdapter struct {
-	RepoID          string            `yaml:"repo_id" json:"repo_id"`
-	RepoPath        string            `yaml:"repo_path" json:"repo_path"`
-	InstallCmd      []string          `yaml:"install_cmd" json:"install_cmd,omitempty"`
-	ExpectedOutputs []string          `yaml:"expected_outputs" json:"expected_outputs"`
-	ProbeCmd        []string          `yaml:"probe_cmd" json:"probe_cmd,omitempty"`
-	DirtyPolicy     string            `yaml:"dirty_policy" json:"dirty_policy"`
-	ReleaseUnit     string            `yaml:"release_unit" json:"release_unit"`
-	Status          string            `yaml:"status" json:"status"`
-	Notes           []string          `yaml:"notes" json:"notes,omitempty"`
-	Env             map[string]string `yaml:"env" json:"env,omitempty"`
+	RepoID          string   `yaml:"repo_id" json:"repo_id"`
+	RepoPath        string   `yaml:"repo_path" json:"repo_path"`
+	InstallCmd      []string `yaml:"install_cmd" json:"install_cmd,omitempty"`
+	ExpectedOutputs []string `yaml:"expected_outputs" json:"expected_outputs"`
+	// SupportArtifacts are non-PATH members of a repo release unit. They are
+	// promoted with the executables, but status continues to audit only the
+	// PATH-facing expected_outputs surface.
+	SupportArtifacts []string          `yaml:"support_artifacts" json:"support_artifacts,omitempty"`
+	ProbeCmd         []string          `yaml:"probe_cmd" json:"probe_cmd,omitempty"`
+	DirtyPolicy      string            `yaml:"dirty_policy" json:"dirty_policy"`
+	ReleaseUnit      string            `yaml:"release_unit" json:"release_unit"`
+	Status           string            `yaml:"status" json:"status"`
+	Notes            []string          `yaml:"notes" json:"notes,omitempty"`
+	Env              map[string]string `yaml:"env" json:"env,omitempty"`
 }
 
 func LoadManifest(ctx *runtime.Context) (Manifest, *contract.AppError) {
@@ -99,6 +104,12 @@ func validateManifest(manifest Manifest) *contract.AppError {
 		case len(repo.ProbeCmd) == 0 && repo.Status == AdapterStatusReady:
 			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Ready adapter %s must declare probe_cmd.", repo.RepoID), "Fix the embedded adapter manifest.")
 		}
+		if appErr := validateArtifactPaths(repo.RepoID, "expected_outputs", repo.ExpectedOutputs); appErr != nil {
+			return appErr
+		}
+		if appErr := validateArtifactPaths(repo.RepoID, "support_artifacts", repo.SupportArtifacts); appErr != nil {
+			return appErr
+		}
 		if _, ok := seen[repo.RepoID]; ok {
 			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter repo_id %s is duplicated.", repo.RepoID), "Fix the embedded adapter manifest.")
 		}
@@ -115,6 +126,47 @@ func SelectReadyAdapters(manifest Manifest) []RepoAdapter {
 		}
 	}
 	return adapters
+}
+
+func promotedArtifacts(repo RepoAdapter) []string {
+	artifacts := make([]string, 0, len(repo.ExpectedOutputs)+len(repo.SupportArtifacts))
+	seen := map[string]struct{}{}
+	for _, list := range [][]string{repo.ExpectedOutputs, repo.SupportArtifacts} {
+		for _, item := range list {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			artifacts = append(artifacts, item)
+		}
+	}
+	return artifacts
+}
+
+func validateArtifactPaths(repoID, field string, items []string) *contract.AppError {
+	for _, item := range items {
+		raw := strings.TrimSpace(item)
+		switch {
+		case raw == "":
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s %s entries must not be empty.", repoID, field), "Fix the embedded adapter manifest.")
+		case filepath.IsAbs(raw):
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s %s entry %q must be relative.", repoID, field, raw), "Fix the embedded adapter manifest.")
+		}
+		clean := filepath.Clean(raw)
+		switch {
+		case clean != raw:
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s %s entry %q must be clean and normalized.", repoID, field, raw), "Fix the embedded adapter manifest.")
+		case clean == "." || clean == "..":
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s %s entry %q is invalid.", repoID, field, raw), "Fix the embedded adapter manifest.")
+		case strings.HasPrefix(clean, ".."+string(filepath.Separator)):
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s %s entry %q must not escape the stage root.", repoID, field, raw), "Fix the embedded adapter manifest.")
+		}
+	}
+	return nil
 }
 
 func normalizeAdapterStatus(raw string) string {

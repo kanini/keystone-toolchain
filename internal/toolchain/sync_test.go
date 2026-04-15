@@ -154,8 +154,8 @@ func TestPromoteFileFallsBackAcrossFilesystems(t *testing.T) {
 		return os.Rename(oldPath, newPath)
 	}
 
-	if err := promoteFile(source, target, renameFn); err != nil {
-		t.Fatalf("promoteFile: %v", err)
+	if err := promotePath(source, target, renameFn); err != nil {
+		t.Fatalf("promotePath: %v", err)
 	}
 	if _, err := os.Stat(source); !os.IsNotExist(err) {
 		t.Fatalf("expected source to be removed, got err=%v", err)
@@ -166,6 +166,157 @@ func TestPromoteFileFallsBackAcrossFilesystems(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "promoted") {
 		t.Fatalf("unexpected target contents: %q", string(data))
+	}
+}
+
+func TestPromoteDirectoryFallsBackAcrossFilesystems(t *testing.T) {
+	sourceRoot := t.TempDir()
+	targetRoot := t.TempDir()
+	source := filepath.Join(sourceRoot, ".ksctx-runtime")
+	target := filepath.Join(targetRoot, ".ksctx-runtime")
+	if err := os.MkdirAll(filepath.Join(source, "mcp"), 0o755); err != nil {
+		t.Fatalf("mkdir source runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "ksctx.js"), []byte("runtime\n"), 0o644); err != nil {
+		t.Fatalf("write runtime js: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "mcp", "schema.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write runtime schema: %v", err)
+	}
+
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("mkdir existing target runtime: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "stale.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write stale runtime file: %v", err)
+	}
+
+	calls := 0
+	renameFn := func(oldPath, newPath string) error {
+		calls++
+		if calls == 1 {
+			return &os.LinkError{Op: "rename", Old: oldPath, New: newPath, Err: syscall.EXDEV}
+		}
+		return os.Rename(oldPath, newPath)
+	}
+
+	if err := promotePath(source, target, renameFn); err != nil {
+		t.Fatalf("promotePath directory: %v", err)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("expected source runtime dir to be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("expected stale target contents to be replaced, got err=%v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "ksctx.js")); err != nil {
+		t.Fatalf("read promoted runtime js: %v", err)
+	} else if !strings.Contains(string(data), "runtime") {
+		t.Fatalf("unexpected runtime js contents: %q", string(data))
+	}
+	if _, err := os.Stat(filepath.Join(target, "mcp", "schema.json")); err != nil {
+		t.Fatalf("expected nested runtime artifact: %v", err)
+	}
+}
+
+func TestSyncPromotesSupportArtifactsForKeystoneContext(t *testing.T) {
+	home := t.TempDir()
+	ctx := testContext(home)
+	repoPath := testGitRepo(t, home)
+	installScript := filepath.Join(home, "install-ksctx.sh")
+	writeExecutable(t, installScript, "#!/bin/sh\nset -eu\nmkdir -p \"$1/.ksctx-runtime/mcp\"\nprintf '#!/bin/sh\\necho ksctx\\n' > \"$1/ksctx\"\nprintf '#!/bin/sh\\necho plugin\\n' > \"$1/ksctx-plugin-pg\"\nprintf 'console.log(1)\\n' > \"$1/.ksctx-runtime/ksctx.js\"\nprintf '{}\\n' > \"$1/.ksctx-runtime/mcp/schema.json\"\nchmod +x \"$1/ksctx\" \"$1/ksctx-plugin-pg\"\n")
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:           "keystone-context",
+				RepoPath:         repoPath,
+				InstallCmd:       []string{installScript, "{{stage_bin}}"},
+				ExpectedOutputs:  []string{"ksctx", "ksctx-plugin-pg"},
+				SupportArtifacts: []string{".ksctx-runtime"},
+				ProbeCmd:         []string{"/bin/sh", "-c", "\"{{stage_bin}}/ksctx\" >/dev/null"},
+				DirtyPolicy:      DirtyPolicyFailClosed,
+				ReleaseUnit:      ReleaseUnitRepo,
+				Status:           AdapterStatusReady,
+			},
+		},
+	}
+
+	if appErr := SyncReadySet(ctx, manifest, PersistedState{}, false); appErr != nil {
+		t.Fatalf("unexpected app error: %v", appErr)
+	}
+	if _, err := os.Stat(filepath.Join(ctx.Config.ManagedBinDir, "ksctx")); err != nil {
+		t.Fatalf("expected promoted ksctx launcher: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ctx.Config.ManagedBinDir, "ksctx-plugin-pg")); err != nil {
+		t.Fatalf("expected promoted ksctx plugin launcher: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ctx.Config.ManagedBinDir, ".ksctx-runtime", "ksctx.js")); err != nil {
+		t.Fatalf("expected promoted runtime js: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ctx.Config.ManagedBinDir, ".ksctx-runtime", "mcp", "schema.json")); err != nil {
+		t.Fatalf("expected promoted runtime schema: %v", err)
+	}
+
+	writeExecutable(t, installScript, "#!/bin/sh\nset -eu\nmkdir -p \"$1/.ksctx-runtime/mcp\"\nprintf '#!/bin/sh\\necho ksctx-v2\\n' > \"$1/ksctx\"\nprintf '#!/bin/sh\\necho plugin-v2\\n' > \"$1/ksctx-plugin-pg\"\nprintf 'console.log(2)\\n' > \"$1/.ksctx-runtime/ksctx.js\"\nprintf '{\"v\":2}\\n' > \"$1/.ksctx-runtime/mcp/schema.json\"\nchmod +x \"$1/ksctx\" \"$1/ksctx-plugin-pg\"\n")
+	if appErr := SyncReadySet(ctx, manifest, PersistedState{}, false); appErr != nil {
+		t.Fatalf("unexpected app error on second sync: %v", appErr)
+	}
+	if data, err := os.ReadFile(filepath.Join(ctx.Config.ManagedBinDir, ".ksctx-runtime", "ksctx.js")); err != nil {
+		t.Fatalf("read promoted runtime js after second sync: %v", err)
+	} else if !strings.Contains(string(data), "console.log(2)") {
+		t.Fatalf("expected second sync to replace runtime js, got %q", string(data))
+	}
+	if data, err := os.ReadFile(filepath.Join(ctx.Config.ManagedBinDir, ".ksctx-runtime", "mcp", "schema.json")); err != nil {
+		t.Fatalf("read promoted runtime schema after second sync: %v", err)
+	} else if !strings.Contains(string(data), "\"v\":2") {
+		t.Fatalf("expected second sync to replace runtime schema, got %q", string(data))
+	}
+}
+
+func TestSyncPreflightsSupportArtifactsBeforePromotion(t *testing.T) {
+	home := t.TempDir()
+	ctx := testContext(home)
+	repoPath := testGitRepo(t, home)
+	installScript := filepath.Join(home, "install-missing-runtime.sh")
+	writeExecutable(t, installScript, "#!/bin/sh\nset -eu\nprintf '#!/bin/sh\\necho ksctx\\n' > \"$1/ksctx\"\nprintf '#!/bin/sh\\necho plugin\\n' > \"$1/ksctx-plugin-pg\"\nchmod +x \"$1/ksctx\" \"$1/ksctx-plugin-pg\"\n")
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:           "keystone-context",
+				RepoPath:         repoPath,
+				InstallCmd:       []string{installScript, "{{stage_bin}}"},
+				ExpectedOutputs:  []string{"ksctx", "ksctx-plugin-pg"},
+				SupportArtifacts: []string{".ksctx-runtime"},
+				ProbeCmd:         []string{"/bin/sh", "-c", "\"{{stage_bin}}/ksctx\" >/dev/null"},
+				DirtyPolicy:      DirtyPolicyFailClosed,
+				ReleaseUnit:      ReleaseUnitRepo,
+				Status:           AdapterStatusReady,
+			},
+		},
+	}
+
+	if appErr := SyncReadySet(ctx, manifest, PersistedState{}, false); appErr != nil {
+		t.Fatalf("unexpected app error: %v", appErr)
+	}
+	persisted, _, _, _, appErr := LoadPersistedState(ctx)
+	if appErr != nil {
+		t.Fatalf("load state: %v", appErr)
+	}
+	if got := persisted.Repos[0].State; got != StateFailed {
+		t.Fatalf("unexpected repo state: %s", got)
+	}
+	if !strings.Contains(persisted.Repos[0].Reason, "expected staged artifact .ksctx-runtime is missing") {
+		t.Fatalf("unexpected failure reason: %q", persisted.Repos[0].Reason)
+	}
+	if _, err := os.Stat(filepath.Join(ctx.Config.ManagedBinDir, "ksctx")); !os.IsNotExist(err) {
+		t.Fatalf("expected no promoted launcher when support artifact is missing, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ctx.Config.ManagedBinDir, ".ksctx-runtime")); !os.IsNotExist(err) {
+		t.Fatalf("expected no promoted runtime dir when support artifact is missing, got err=%v", err)
 	}
 }
 

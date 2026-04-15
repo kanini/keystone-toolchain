@@ -80,3 +80,31 @@ func TestSelectReadyAdapters(t *testing.T) {
 		t.Fatalf("unexpected ready adapter: %#v", ready[0])
 	}
 }
+
+func TestValidateManifestRejectsUnsafeArtifactPaths(t *testing.T) {
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: "/tmp/managed",
+		Repos: []RepoAdapter{
+			{
+				RepoID:           "keystone-context",
+				RepoPath:         "/tmp/repo",
+				InstallCmd:       []string{"make", "build-local", "BIN_DIR={{stage_bin}}"},
+				ExpectedOutputs:  []string{"ksctx"},
+				SupportArtifacts: []string{"../.ksctx-runtime"},
+				ProbeCmd:         []string{"{{stage_bin}}/ksctx", "--version"},
+				DirtyPolicy:      DirtyPolicyFailClosed,
+				ReleaseUnit:      ReleaseUnitRepo,
+				Status:           AdapterStatusReady,
+			},
+		},
+	}
+
+	appErr := validateManifest(manifest)
+	if appErr == nil {
+		t.Fatal("expected validation error for unsafe artifact path")
+	}
+	if !strings.Contains(appErr.Message, "must not escape the stage root") {
+		t.Fatalf("unexpected validation message: %q", appErr.Message)
+	}
+}
