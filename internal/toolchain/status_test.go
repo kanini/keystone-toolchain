@@ -309,6 +309,69 @@ func TestBuildStatusReportCurrentRequiresManagedPathResolution(t *testing.T) {
 	}
 }
 
+func TestBuildStatusReportWarnsWhenSupportArtifactMissing(t *testing.T) {
+	home := t.TempDir()
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir managed bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "ksctx"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write ksctx: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "ksctx-plugin-pg"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write ksctx-plugin-pg: %v", err)
+	}
+	t.Setenv("PATH", ctx.Config.ManagedBinDir)
+
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:           "keystone-context",
+				RepoPath:         filepath.Join(home, "context"),
+				ExpectedOutputs:  []string{"ksctx", "ksctx-plugin-pg"},
+				SupportArtifacts: []string{".ksctx-runtime"},
+				DirtyPolicy:      DirtyPolicyFailClosed,
+				ReleaseUnit:      ReleaseUnitRepo,
+				Status:           AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{
+				RepoID:      "keystone-context",
+				State:       StateCurrent,
+				ActiveBuild: "abc1234",
+				Outputs:     []string{"ksctx", "ksctx-plugin-pg"},
+			},
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateCurrent {
+		t.Fatalf("missing support artifact should remain a warning, got state %s", got)
+	}
+	if len(report.Repos[0].Warnings) != 1 {
+		t.Fatalf("expected one support warning, got %#v", report.Repos[0].Warnings)
+	}
+	if !strings.Contains(report.Repos[0].Warnings[0], ".ksctx-runtime") {
+		t.Fatalf("unexpected support warning: %#v", report.Repos[0].Warnings)
+	}
+	if got := report.Summary.Overall; got != StateCurrent {
+		t.Fatalf("support warning should not demote overall state, got %s", got)
+	}
+}
+
 func TestLoadPersistedStateRejectsWrongSchema(t *testing.T) {
 	home := t.TempDir()
 	ctx := &runtime.Context{
@@ -516,6 +579,7 @@ func TestRenderStatusTextIncludesSummary(t *testing.T) {
 				RepoID:        "keystone-memory",
 				AdapterStatus: "candidate",
 				State:         StateUnknown,
+				Warnings:      []string{"runtime bundle missing"},
 				RepoPath:      "/tmp/repo",
 				Outputs: []OutputStatus{
 					{Name: "ksmem", State: StateUnknown, ExpectedPath: "/tmp/bin/ksmem"},
@@ -531,6 +595,9 @@ func TestRenderStatusTextIncludesSummary(t *testing.T) {
 	}
 	if !strings.Contains(joined, "keystone-memory  adapter=candidate  state=UNKNOWN") {
 		t.Fatalf("unexpected text: %s", joined)
+	}
+	if !strings.Contains(joined, "warning: runtime bundle missing") {
+		t.Fatalf("expected warnings in text render: %s", joined)
 	}
 	if strings.Contains(joined, "output ksmem") {
 		t.Fatalf("non-ready adapter output section should be suppressed in text render: %s", joined)

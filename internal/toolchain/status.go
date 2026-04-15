@@ -73,6 +73,7 @@ type RepoStatus struct {
 	RepoHead      string         `json:"repo_head,omitempty"`
 	ActiveBuild   string         `json:"active_build,omitempty"`
 	Notes         []string       `json:"notes,omitempty"`
+	Warnings      []string       `json:"warnings,omitempty"`
 	Outputs       []OutputStatus `json:"outputs"`
 }
 
@@ -152,6 +153,9 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 						repoState.Reason = fmt.Sprintf("repo HEAD %s is ahead of active build %s", shortValue(liveHead), shortValue(repoState.ActiveBuild))
 					}
 				}
+			}
+			for _, warning := range missingSupportArtifactWarnings(ctx, adapter, repoState) {
+				repoState.Warnings = append(repoState.Warnings, warning)
 			}
 		}
 
@@ -300,6 +304,9 @@ func RenderStatusText(report StatusReport) []string {
 		lines = append(lines, fmt.Sprintf("%s  adapter=%s  state=%s", repo.RepoID, repo.AdapterStatus, repo.State))
 		if repo.Reason != "" {
 			lines = append(lines, fmt.Sprintf("  reason: %s", repo.Reason))
+		}
+		for _, warning := range repo.Warnings {
+			lines = append(lines, fmt.Sprintf("  warning: %s", warning))
 		}
 		lines = append(lines, fmt.Sprintf("  repo: %s", repo.RepoPath))
 		if repo.AdapterStatus == AdapterStatusReady {
@@ -460,4 +467,27 @@ func shortValue(v string) string {
 		return "unknown"
 	}
 	return v
+}
+
+func missingSupportArtifactWarnings(ctx *runtime.Context, adapter RepoAdapter, repo RepoStatus) []string {
+	if repo.ActiveBuild == "" {
+		return nil
+	}
+	warnings := make([]string, 0, len(adapter.SupportArtifacts))
+	for _, artifact := range adapter.SupportArtifacts {
+		artifact = strings.TrimSpace(artifact)
+		if artifact == "" {
+			continue
+		}
+		target := filepath.Join(ctx.Config.ManagedBinDir, artifact)
+		if _, err := os.Stat(target); err == nil {
+			continue
+		} else if errors.Is(err, os.ErrNotExist) {
+			warnings = append(warnings, fmt.Sprintf("support artifact %s is missing from managed bin", artifact))
+			continue
+		} else {
+			warnings = append(warnings, fmt.Sprintf("support artifact %s could not be inspected: %v", artifact, err))
+		}
+	}
+	return warnings
 }
