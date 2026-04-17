@@ -21,7 +21,7 @@ func TestInitReportDelegatesThroughSharedReadySetExecutor(t *testing.T) {
 
 	svc := New(testServiceContext(home))
 	delegateCalls := 0
-	svc.readySetExecutor = func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
 		delegateCalls++
 		return toolchain.StatusReport{
 			Schema:        toolchain.StatusReportSchema,
@@ -62,7 +62,7 @@ func TestInitReportDryRunDoesNotDelegateOrWriteState(t *testing.T) {
 
 	svc := New(testServiceContext(home))
 	delegateCalls := 0
-	svc.readySetExecutor = func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
 		delegateCalls++
 		return toolchain.StatusReport{}, nil, contract.ExitOK, nil
 	}
@@ -95,7 +95,7 @@ func TestInitReportInheritsDelegatedNonSuccess(t *testing.T) {
 	t.Setenv("SHELL", "/bin/bash")
 
 	svc := New(testServiceContext(home))
-	svc.readySetExecutor = func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
 		return toolchain.StatusReport{
 			Schema:        toolchain.StatusReportSchema,
 			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
@@ -130,6 +130,44 @@ func TestInitReportInheritsDelegatedNonSuccess(t *testing.T) {
 	}
 	if !containsString(report.ManualActions, "run `kstoolchain sync`") {
 		t.Fatalf("expected delegated next action to name sync, got %#v", report.ManualActions)
+	}
+}
+
+func TestSyncReportPassesOptionsToSharedReadySetExecutor(t *testing.T) {
+	home := t.TempDir()
+	svc := New(testServiceContext(home))
+
+	called := false
+	svc.readySetExecutor = func(opts toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+		called = true
+		if !opts.AllowDirty {
+			t.Fatalf("expected allow-dirty option to reach shared executor, got %#v", opts)
+		}
+		return toolchain.StatusReport{
+			Schema:        toolchain.StatusReportSchema,
+			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
+			Summary: toolchain.StatusSummary{
+				Overall:     toolchain.StateCurrent,
+				StateCounts: map[string]int{toolchain.StateCurrent: 1},
+			},
+		}, nil, contract.ExitOK, nil
+	}
+
+	report, warnings, exitCode, appErr := svc.SyncReport(toolchain.SyncOptions{AllowDirty: true})
+	if appErr != nil {
+		t.Fatalf("sync report: %v", appErr)
+	}
+	if !called {
+		t.Fatal("expected shared ready-set executor call")
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %#v", warnings)
+	}
+	if exitCode != contract.ExitOK {
+		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitOK)
+	}
+	if report.Summary.Overall != toolchain.StateCurrent {
+		t.Fatalf("unexpected overall state: %s", report.Summary.Overall)
 	}
 }
 

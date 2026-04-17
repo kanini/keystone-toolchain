@@ -469,6 +469,50 @@ func TestLoadPersistedStateRejectsWrongSchema(t *testing.T) {
 	}
 }
 
+func TestLoadPersistedStateRejectsLegacyV1Alpha1Schema(t *testing.T) {
+	home := t.TempDir()
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
+	body := `{"schema":"kstoolchain.state/v1alpha1","managed_bin_dir":"` + ctx.Config.ManagedBinDir + `","repos":[]}`
+	if err := os.WriteFile(stateFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write legacy schema: %v", err)
+	}
+	if _, _, _, _, appErr := LoadPersistedState(ctx); appErr == nil {
+		t.Fatal("expected legacy schema rejection")
+	}
+}
+
+func TestLoadPersistedStateRejectsMissingSourceKindInCurrentState(t *testing.T) {
+	home := t.TempDir()
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
+	body := `{"schema":"` + PersistedStateSchema + `","managed_bin_dir":"` + ctx.Config.ManagedBinDir + `","repos":[{"repo_id":"keystone-hub","state":"CURRENT","repo_head":"deadbeef","active_build":"deadbeef"}]}`
+	if err := os.WriteFile(stateFile, []byte(body), 0o644); err != nil {
+		t.Fatalf("write invalid source-kind state: %v", err)
+	}
+	if _, _, _, _, appErr := LoadPersistedState(ctx); appErr == nil {
+		t.Fatal("expected missing source-kind rejection")
+	}
+}
+
 func TestLoadPersistedStateManagedBinDirDriftReturnsContractDrift(t *testing.T) {
 	home := t.TempDir()
 	ctx := &runtime.Context{
@@ -500,6 +544,46 @@ func TestLoadPersistedStateManagedBinDirDriftReturnsContractDrift(t *testing.T) 
 	}
 	if len(persisted.Repos) != 0 {
 		t.Fatalf("expected empty persisted state, got %#v", persisted)
+	}
+}
+
+func TestValidatePersistedStateShapeRejectsMismatchedCurrentPairs(t *testing.T) {
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: "/tmp/bin",
+		Repos: []PersistedRepoState{
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateCurrent,
+				RepoHead:              "deadbeef",
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           "cafebabe",
+				ActiveSourceKind:      SourceKindDirtyWorktree,
+			},
+		},
+	}
+	if appErr := validatePersistedStateShape(persisted); appErr == nil {
+		t.Fatal("expected CURRENT pair mismatch rejection")
+	}
+}
+
+func TestValidatePersistedStateShapeRejectsFailedStateWithActivePair(t *testing.T) {
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: "/tmp/bin",
+		Repos: []PersistedRepoState{
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateFailed,
+				RepoHead:              "deadbeef",
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           "deadbeef",
+				ActiveSourceKind:      SourceKindCleanHead,
+			},
+		},
+	}
+	if appErr := validatePersistedStateShape(persisted); appErr == nil {
+		t.Fatal("expected FAILED active-pair rejection")
 	}
 }
 

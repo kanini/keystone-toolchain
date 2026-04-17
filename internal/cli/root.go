@@ -157,6 +157,8 @@ Text mode is for people. JSON mode is for tools and agents.`,
 }
 
 func (a *app) newSyncCmd() *cobra.Command {
+	var allowDirty bool
+
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Sync managed Keystone tools",
@@ -167,6 +169,7 @@ Sync is intentionally narrow in v1:
 - it stages, probes, and then promotes
 - it writes current.json so status can read the result back truthfully`,
 		Example: `  kstoolchain sync
+  kstoolchain sync --allow-dirty
   kstoolchain sync --json`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) != 0 {
@@ -175,7 +178,7 @@ Sync is intentionally narrow in v1:
 				})
 			}
 			return a.runCommand(func(_ *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
-				report, warnings, exitCode, appErr := svc.SyncReport()
+				report, warnings, exitCode, appErr := svc.SyncReport(toolchain.SyncOptions{AllowDirty: allowDirty})
 				if appErr != nil {
 					return nil, nil, warnings, exitCode, appErr
 				}
@@ -187,6 +190,7 @@ Sync is intentionally narrow in v1:
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "Allow one-shot suite-wide sync from dirty ready repos")
 	a.addAdaptersFlag(cmd)
 	return cmd
 }

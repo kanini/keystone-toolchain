@@ -10,7 +10,7 @@ import (
 
 type Service struct {
 	ctx              *runtime.Context
-	readySetExecutor func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError)
+	readySetExecutor func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError)
 }
 
 func New(ctx *runtime.Context) *Service {
@@ -41,8 +41,8 @@ func (s *Service) StatusReport() (toolchain.StatusReport, []contract.Warning, in
 	return report, warnings, toolchain.StatusExitCode(report), nil
 }
 
-func (s *Service) SyncReport() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
-	return s.readySetExecutor()
+func (s *Service) SyncReport(opts toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	return s.readySetExecutor(opts)
 }
 
 func (s *Service) InitReport(in io.Reader, out io.Writer, opts toolchain.InitOptions) (toolchain.InitReport, []contract.Warning, int, *contract.AppError) {
@@ -54,7 +54,7 @@ func (s *Service) InitReport(in io.Reader, out io.Writer, opts toolchain.InitOpt
 		return report, nil, report.ExitCode(), nil
 	}
 
-	readyReport, warnings, _, appErr := s.readySetExecutor()
+	readyReport, warnings, _, appErr := s.readySetExecutor(toolchain.SyncOptions{})
 	if appErr != nil {
 		return toolchain.InitReport{}, warnings, appErr.Exit, appErr
 	}
@@ -65,7 +65,7 @@ func (s *Service) InitReport(in io.Reader, out io.Writer, opts toolchain.InitOpt
 	return report, warnings, toolchain.StatusExitCode(readyReport), nil
 }
 
-func (s *Service) executeReadySetSync() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+func (s *Service) executeReadySetSync(opts toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
 	manifest, appErr := toolchain.LoadManifest(s.ctx)
 	if appErr != nil {
 		return toolchain.StatusReport{}, nil, contract.ExitValidation, appErr
@@ -78,7 +78,7 @@ func (s *Service) executeReadySetSync() (toolchain.StatusReport, []contract.Warn
 	if appErr != nil {
 		return toolchain.StatusReport{}, warnings, appErr.Exit, appErr
 	}
-	if appErr := toolchain.SyncReadySet(s.ctx, manifest, persisted, statePresent); appErr != nil {
+	if appErr := toolchain.SyncReadySet(s.ctx, manifest, persisted, statePresent, opts); appErr != nil {
 		return toolchain.StatusReport{}, warnings, appErr.Exit, appErr
 	}
 	readyManifest := manifest

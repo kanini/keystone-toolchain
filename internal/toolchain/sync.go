@@ -14,7 +14,16 @@ import (
 	"github.com/kanini/keystone-toolchain/internal/runtime"
 )
 
-func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState, priorPresent bool) *contract.AppError {
+type SyncOptions struct {
+	AllowDirty bool
+}
+
+type repoObservation struct {
+	Head       string
+	SourceKind string
+}
+
+func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState, priorPresent bool, opts SyncOptions) *contract.AppError {
 	ready := SelectReadyAdapters(manifest)
 	if len(ready) == 0 {
 		return contract.Validation(contract.CodeConfigInvalid, "Adapter manifest does not declare any ready adapters.", "Mark at least one adapter ready before running sync.")
@@ -38,7 +47,7 @@ func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState,
 
 	allSucceeded := true
 	for _, adapter := range ready {
-		repoState := syncReadyAdapter(ctx, adapter, priorIndex[adapter.RepoID])
+		repoState := syncReadyAdapter(ctx, adapter, priorIndex[adapter.RepoID], opts)
 		if repoState.State != StateCurrent {
 			allSucceeded = false
 		}
@@ -52,7 +61,7 @@ func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState,
 	return appErr
 }
 
-func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior PersistedRepoState) PersistedRepoState {
+func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior PersistedRepoState, opts SyncOptions) PersistedRepoState {
 	repoState := PersistedRepoState{
 		RepoID:  adapter.RepoID,
 		Outputs: append([]string{}, adapter.ExpectedOutputs...),
@@ -62,23 +71,22 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 	if setup.State == StateSetupBlocked {
 		repoState.State = StateSetupBlocked
 		repoState.Reason = setup.Reason
-		repoState.ActiveBuild = prior.ActiveBuild
-		repoState.RepoHead = prior.RepoHead
+		copyClassifiedInputPair(&repoState, prior)
+		copyActiveBuildPair(&repoState, prior)
 		return repoState
-	}
-	if setup.RepoHead != "" {
-		repoState.RepoHead = setup.RepoHead
 	}
 
-	dirty, reason := repoDirty(adapter.RepoPath)
-	if dirty {
-		repoState.State = StateDirtySkipped
-		repoState.Reason = reason
-		repoState.ActiveBuild = prior.ActiveBuild
+	classified, reason := observeRepoSource(adapter.RepoPath)
+	if reason != "" {
+		copyClassifiedInputPair(&repoState, prior)
+		applyFailureState(&repoState, prior, truncateReason(reason))
 		return repoState
 	}
-	if reason != "" {
-		applyFailureState(&repoState, prior, truncateReason(reason))
+	setClassifiedInputPair(&repoState, classified.Head, classified.SourceKind)
+	if classified.SourceKind == SourceKindDirtyWorktree && !opts.AllowDirty {
+		repoState.State = StateDirtySkipped
+		repoState.Reason = dirtyRepoReason()
+		copyActiveBuildPair(&repoState, prior)
 		return repoState
 	}
 
@@ -127,6 +135,16 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 		applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not create managed bin dir: %v", err)))
 		return repoState
 	}
+
+	promotionObservation, reason := observeRepoSource(adapter.RepoPath)
+	if reason != "" {
+		applyFailureState(&repoState, prior, truncateReason(reason))
+		return repoState
+	}
+	if reason := validatePromotionBoundary(classified, promotionObservation); reason != "" {
+		applyFailureState(&repoState, prior, reason)
+		return repoState
+	}
 	for _, artifact := range artifacts {
 		source := filepath.Join(stageBin, artifact)
 		target := filepath.Join(ctx.Config.ManagedBinDir, artifact)
@@ -137,24 +155,25 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 	}
 
 	repoState.State = StateCurrent
-	repoState.ActiveBuild = repoState.RepoHead
+	setActiveBuildPair(&repoState, classified.Head, classified.SourceKind)
 	return repoState
 }
 
-func repoDirty(repoPath string) (bool, string) {
+func observeRepoSource(repoPath string) (repoObservation, string) {
 	gitPath, ok := resolveGitBinary()
 	if !ok {
-		return false, "could not inspect repo dirtiness: git executable not found"
+		return repoObservation{}, "could not inspect repo dirtiness: git executable not found"
 	}
-	cmd := exec.Command(gitPath, "-C", repoPath, "status", "--porcelain")
+	cmd := exec.Command(gitPath, "-C", repoPath, "status", "--porcelain=v2", "--branch")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return false, fmt.Sprintf("could not inspect repo dirtiness: %v", err)
+		return repoObservation{}, fmt.Sprintf("could not inspect repo dirtiness: %v", err)
 	}
-	if strings.TrimSpace(string(out)) != "" {
-		return true, "repo has uncommitted changes; sync is fail_closed in v1"
+	observation, err := parseRepoObservation(string(out))
+	if err != nil {
+		return repoObservation{}, truncateReason(fmt.Sprintf("could not inspect repo dirtiness: %v", err))
 	}
-	return false, ""
+	return observation, ""
 }
 
 func runRepoCommand(repoPath string, args []string, env map[string]string) (string, error) {
@@ -176,11 +195,73 @@ func runRepoCommand(repoPath string, args []string, env map[string]string) (stri
 func applyFailureState(repoState *PersistedRepoState, prior PersistedRepoState, reason string) {
 	if prior.ActiveBuild != "" {
 		repoState.State = StateStaleLKG
-		repoState.ActiveBuild = prior.ActiveBuild
+		copyActiveBuildPair(repoState, prior)
 	} else {
 		repoState.State = StateFailed
 	}
 	repoState.Reason = reason
+}
+
+func dirtyRepoReason() string {
+	return "repo has uncommitted changes; sync is fail_closed in v1"
+}
+
+func copyClassifiedInputPair(dst *PersistedRepoState, src PersistedRepoState) {
+	dst.RepoHead = src.RepoHead
+	dst.LastAttemptSourceKind = src.LastAttemptSourceKind
+}
+
+func copyActiveBuildPair(dst *PersistedRepoState, src PersistedRepoState) {
+	dst.ActiveBuild = src.ActiveBuild
+	dst.ActiveSourceKind = src.ActiveSourceKind
+}
+
+func setClassifiedInputPair(dst *PersistedRepoState, head, sourceKind string) {
+	dst.RepoHead = strings.TrimSpace(head)
+	dst.LastAttemptSourceKind = strings.TrimSpace(sourceKind)
+}
+
+func setActiveBuildPair(dst *PersistedRepoState, head, sourceKind string) {
+	dst.ActiveBuild = strings.TrimSpace(head)
+	dst.ActiveSourceKind = strings.TrimSpace(sourceKind)
+}
+
+func parseRepoObservation(raw string) (repoObservation, error) {
+	observation := repoObservation{}
+	dirty := false
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "# branch.oid ") {
+			observation.Head = strings.TrimSpace(strings.TrimPrefix(line, "# branch.oid "))
+			continue
+		}
+		if strings.HasPrefix(line, "# ") {
+			continue
+		}
+		dirty = true
+	}
+	if observation.Head == "" || observation.Head == "(initial)" || observation.Head == "(unknown)" {
+		return repoObservation{}, fmt.Errorf("repo HEAD could not be resolved")
+	}
+	if dirty {
+		observation.SourceKind = SourceKindDirtyWorktree
+	} else {
+		observation.SourceKind = SourceKindCleanHead
+	}
+	return observation, nil
+}
+
+func validatePromotionBoundary(classified, promotion repoObservation) string {
+	if promotion.Head != classified.Head {
+		return truncateReason(fmt.Sprintf("repo HEAD changed from %s to %s before promotion boundary", shortValue(classified.Head), shortValue(promotion.Head)))
+	}
+	if classified.SourceKind == SourceKindCleanHead && promotion.SourceKind != SourceKindCleanHead {
+		return "repo became dirty before promotion boundary"
+	}
+	return ""
 }
 
 func commandFailureReason(step, output string, err error) string {

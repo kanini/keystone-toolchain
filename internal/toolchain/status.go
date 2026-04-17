@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	PersistedStateSchema = "kstoolchain.state/v1alpha1"
+	PersistedStateSchema = "kstoolchain.state/v1alpha2"
 	StatusReportSchema   = "kstoolchain.status/v1alpha1"
 
 	StateCurrent       = "CURRENT"
@@ -24,6 +24,9 @@ const (
 	StateShadowed      = "SHADOWED"
 	StateContractDrift = "CONTRACT_DRIFT"
 	StateUnknown       = "UNKNOWN"
+
+	SourceKindCleanHead     = "clean_head"
+	SourceKindDirtyWorktree = "dirty_worktree"
 )
 
 type PersistedState struct {
@@ -35,12 +38,14 @@ type PersistedState struct {
 }
 
 type PersistedRepoState struct {
-	RepoID      string   `json:"repo_id"`
-	State       string   `json:"state"`
-	Reason      string   `json:"reason,omitempty"`
-	RepoHead    string   `json:"repo_head,omitempty"`
-	ActiveBuild string   `json:"active_build,omitempty"`
-	Outputs     []string `json:"outputs,omitempty"`
+	RepoID                string   `json:"repo_id"`
+	State                 string   `json:"state"`
+	Reason                string   `json:"reason,omitempty"`
+	RepoHead              string   `json:"repo_head,omitempty"`
+	LastAttemptSourceKind string   `json:"last_attempt_source_kind,omitempty"`
+	ActiveBuild           string   `json:"active_build,omitempty"`
+	ActiveSourceKind      string   `json:"active_source_kind,omitempty"`
+	Outputs               []string `json:"outputs,omitempty"`
 }
 
 type StatusReport struct {
@@ -404,6 +409,17 @@ func deriveRepoState(repo RepoStatus) string {
 	return state
 }
 
+func normalizeSourceKind(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case SourceKindCleanHead:
+		return SourceKindCleanHead
+	case SourceKindDirtyWorktree:
+		return SourceKindDirtyWorktree
+	default:
+		return ""
+	}
+}
+
 func deriveOverall(counts map[string]int) string {
 	if len(counts) == 0 {
 		return StateUnknown
@@ -431,12 +447,74 @@ func validatePersistedStateShape(persisted PersistedState) *contract.AppError {
 		if normalizedState(repo.State) != repo.State {
 			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s has an invalid state.", repo.RepoID), "Remove or fix the state file.", contract.Detail{Name: "state", Value: repo.State})
 		}
+		if appErr := validatePersistedRepoState(repo); appErr != nil {
+			return appErr
+		}
 		if _, ok := seen[repo.RepoID]; ok {
 			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state duplicates repo_id %s.", repo.RepoID), "Remove or fix the state file.")
 		}
 		seen[repo.RepoID] = struct{}{}
 	}
 	return nil
+}
+
+type provenancePair struct {
+	head       string
+	sourceKind string
+	present    bool
+}
+
+func validatePersistedRepoState(repo PersistedRepoState) *contract.AppError {
+	classified, appErr := validateProvenancePair(repo.RepoID, "repo_head", repo.RepoHead, "last_attempt_source_kind", repo.LastAttemptSourceKind)
+	if appErr != nil {
+		return appErr
+	}
+	active, appErr := validateProvenancePair(repo.RepoID, "active_build", repo.ActiveBuild, "active_source_kind", repo.ActiveSourceKind)
+	if appErr != nil {
+		return appErr
+	}
+
+	switch repo.State {
+	case StateCurrent:
+		if !classified.present || !active.present {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s must carry both provenance pairs when state is CURRENT.", repo.RepoID), "Remove or fix the state file.")
+		}
+		if classified.head != active.head || classified.sourceKind != active.sourceKind {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s has mismatched CURRENT provenance pairs.", repo.RepoID), "Remove or fix the state file.")
+		}
+	case StateDirtySkipped:
+		if !classified.present || classified.sourceKind != SourceKindDirtyWorktree {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s must carry a dirty classified-input pair when state is DIRTY_SKIPPED.", repo.RepoID), "Remove or fix the state file.")
+		}
+	case StateSetupBlocked:
+		return nil
+	case StateStaleLKG:
+		if !active.present {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s must carry an active promoted-build pair when state is STALE_LKG.", repo.RepoID), "Remove or fix the state file.")
+		}
+	case StateFailed:
+		if active.present {
+			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s must not carry an active promoted-build pair when state is FAILED.", repo.RepoID), "Remove or fix the state file.")
+		}
+	default:
+		return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s has an unsupported persisted state %s.", repo.RepoID, repo.State), "Remove or fix the state file.", contract.Detail{Name: "state", Value: repo.State})
+	}
+	return nil
+}
+
+func validateProvenancePair(repoID, headField, headValue, sourceField, sourceValue string) (provenancePair, *contract.AppError) {
+	head := strings.TrimSpace(headValue)
+	sourceKind := strings.TrimSpace(sourceValue)
+	switch {
+	case head == "" && sourceKind == "":
+		return provenancePair{}, nil
+	case head == "" || sourceKind == "":
+		return provenancePair{}, contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s must set %s and %s together.", repoID, headField, sourceField), "Remove or fix the state file.")
+	case normalizeSourceKind(sourceKind) == "":
+		return provenancePair{}, contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Toolchain state for %s has an invalid %s.", repoID, sourceField), "Remove or fix the state file.", contract.Detail{Name: sourceField, Value: sourceValue})
+	default:
+		return provenancePair{head: head, sourceKind: sourceKind, present: true}, nil
+	}
 }
 
 func persistedStateMatchesActiveConfig(ctx *runtime.Context, persisted PersistedState) (bool, *contract.AppError) {
