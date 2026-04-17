@@ -32,7 +32,7 @@ type InitReport struct {
 	UnknownRows    []OverlayRepo `json:"unknown_rows,omitempty"`
 	Diff           []OverlayDiff `json:"diff,omitempty"`
 	Delegated      bool          `json:"delegated"`
-	ReadySet       *StatusReport `json:"ready_set,omitempty"`
+	ReadySet       *SyncReport   `json:"ready_set,omitempty"`
 	ChangedItems   []string      `json:"changed_items,omitempty"`
 	AlreadyCorrect []string      `json:"already_correct,omitempty"`
 	ManualActions  []string      `json:"manual_actions,omitempty"`
@@ -278,7 +278,7 @@ func RenderInitText(report InitReport) []string {
 	case report.DryRun:
 		lines = append(lines, "Init: preview only")
 	case report.Delegated && report.ReadySet != nil:
-		lines = append(lines, fmt.Sprintf("Init: delegated ready-set result %s", report.ReadySet.Summary.Overall))
+		lines = append(lines, fmt.Sprintf("Init: delegated ready-set result %s", report.ReadySet.Outcome))
 	case report.ExitCode() == contract.ExitOK:
 		lines = append(lines, "Init: bootstrap and overlay setup complete")
 	default:
@@ -314,7 +314,7 @@ func RenderInitText(report InitReport) []string {
 	}
 	if report.Delegated && report.ReadySet != nil {
 		lines = append(lines, "Delegated ready-set result:")
-		for _, line := range RenderStatusText(*report.ReadySet) {
+		for _, line := range RenderSyncText(*report.ReadySet, true) {
 			lines = append(lines, "  "+line)
 		}
 	} else if !report.DryRun {

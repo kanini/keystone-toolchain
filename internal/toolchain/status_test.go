@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kanini/keystone-toolchain/internal/contract"
 	"github.com/kanini/keystone-toolchain/internal/runtime"
 )
 
@@ -249,23 +248,6 @@ func TestBuildStatusReportKeepsDirtySkippedWhenHeadMoves(t *testing.T) {
 	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
 	if got := report.Repos[0].State; got != StateDirtySkipped {
 		t.Fatalf("unexpected repo state: %s", got)
-	}
-}
-
-func TestSyncExitCodeIgnoresShadowedReadyPath(t *testing.T) {
-	manifest := Manifest{
-		Repos: []RepoAdapter{
-			{RepoID: "keystone-hub", Status: AdapterStatusReady},
-			{RepoID: "keystone-memory", Status: AdapterStatusCandidate},
-		},
-	}
-	persisted := PersistedState{
-		Repos: []PersistedRepoState{
-			{RepoID: "keystone-hub", State: StateCurrent},
-		},
-	}
-	if got := SyncExitCode(manifest, persisted); got != contract.ExitOK {
-		t.Fatalf("unexpected exit code: %d", got)
 	}
 }
 
@@ -663,6 +645,13 @@ func TestStatusHubReportsStaleWhenRepoHeadMoves(t *testing.T) {
 	}
 	runGit("add", "README.md")
 	runGit("commit", "-m", "second")
+	cmd = exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = hubRepo
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse second head: %v", err)
+	}
+	liveHead := strings.TrimSpace(string(out))
 
 	ctx := &runtime.Context{
 		HomeDir: home,
@@ -689,7 +678,14 @@ func TestStatusHubReportsStaleWhenRepoHeadMoves(t *testing.T) {
 		Schema:        PersistedStateSchema,
 		ManagedBinDir: ctx.Config.ManagedBinDir,
 		Repos: []PersistedRepoState{
-			{RepoID: "keystone-hub", State: StateCurrent, ActiveBuild: activeBuild},
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateCurrent,
+				RepoHead:              activeBuild,
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           activeBuild,
+				ActiveSourceKind:      SourceKindCleanHead,
+			},
 		},
 	}
 
@@ -711,6 +707,12 @@ func TestStatusHubReportsStaleWhenRepoHeadMoves(t *testing.T) {
 	}
 	if report.Repos[0].Reason == "" {
 		t.Fatal("expected non-empty reason for STALE_LKG")
+	}
+	if got := report.Repos[0].RepoHead; got != activeBuild {
+		t.Fatalf("expected repo_head to remain persisted classified-input truth, got %s want %s", got, activeBuild)
+	}
+	if report.Repos[0].RepoHead == liveHead {
+		t.Fatalf("repo_head must not be overwritten with live observed HEAD %s", liveHead)
 	}
 }
 

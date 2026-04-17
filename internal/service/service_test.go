@@ -21,16 +21,26 @@ func TestInitReportDelegatesThroughSharedReadySetExecutor(t *testing.T) {
 
 	svc := New(testServiceContext(home))
 	delegateCalls := 0
-	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError) {
 		delegateCalls++
-		return toolchain.StatusReport{
-			Schema:        toolchain.StatusReportSchema,
-			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
-			Summary: toolchain.StatusSummary{
-				Overall:     toolchain.StateCurrent,
-				StateCounts: map[string]int{toolchain.StateCurrent: 1},
+		report := toolchain.SyncReport{
+			Schema:  toolchain.SyncReportSchema,
+			Outcome: toolchain.SyncOutcomeSucceeded,
+			Summary: toolchain.SyncSummary{
+				ReadyRepoCount:   1,
+				UpdatedRepoCount: 1,
 			},
-		}, nil, contract.ExitOK, nil
+			PrimaryNextAction: "open a new shell or source your rc file so /tmp/bin wins on PATH",
+			FinalStatus: toolchain.StatusReport{
+				Schema:        toolchain.StatusReportSchema,
+				ManagedBinDir: svc.ctx.Config.ManagedBinDir,
+				Summary: toolchain.StatusSummary{
+					Overall:     toolchain.StateCurrent,
+					StateCounts: map[string]int{toolchain.StateCurrent: 1},
+				},
+			},
+		}
+		return report, nil, report.ExitCode(), nil
 	}
 
 	var stdout bytes.Buffer
@@ -62,9 +72,9 @@ func TestInitReportDryRunDoesNotDelegateOrWriteState(t *testing.T) {
 
 	svc := New(testServiceContext(home))
 	delegateCalls := 0
-	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError) {
 		delegateCalls++
-		return toolchain.StatusReport{}, nil, contract.ExitOK, nil
+		return toolchain.SyncReport{}, nil, contract.ExitOK, nil
 	}
 
 	var stdout bytes.Buffer
@@ -95,22 +105,32 @@ func TestInitReportInheritsDelegatedNonSuccess(t *testing.T) {
 	t.Setenv("SHELL", "/bin/bash")
 
 	svc := New(testServiceContext(home))
-	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
-		return toolchain.StatusReport{
-			Schema:        toolchain.StatusReportSchema,
-			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
-			Summary: toolchain.StatusSummary{
-				Overall:     toolchain.StateFailed,
-				StateCounts: map[string]int{toolchain.StateFailed: 1},
+	svc.readySetExecutor = func(toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError) {
+		report := toolchain.SyncReport{
+			Schema:  toolchain.SyncReportSchema,
+			Outcome: toolchain.SyncOutcomeCompletedWithBlockers,
+			Summary: toolchain.SyncSummary{
+				ReadyRepoCount:   1,
+				BlockedRepoCount: 1,
 			},
-			Repos: []toolchain.RepoStatus{
-				{
-					RepoID:        "keystone-hub",
-					AdapterStatus: toolchain.AdapterStatusReady,
-					State:         toolchain.StateFailed,
+			PrimaryNextAction: "fix the build or probe failure for keystone-hub, then run `kstoolchain sync`",
+			FinalStatus: toolchain.StatusReport{
+				Schema:        toolchain.StatusReportSchema,
+				ManagedBinDir: svc.ctx.Config.ManagedBinDir,
+				Summary: toolchain.StatusSummary{
+					Overall:     toolchain.StateFailed,
+					StateCounts: map[string]int{toolchain.StateFailed: 1},
+				},
+				Repos: []toolchain.RepoStatus{
+					{
+						RepoID:        "keystone-hub",
+						AdapterStatus: toolchain.AdapterStatusReady,
+						State:         toolchain.StateFailed,
+					},
 				},
 			},
-		}, nil, contract.ExitOK, nil
+		}
+		return report, nil, report.ExitCode(), nil
 	}
 
 	var stdout bytes.Buffer
@@ -118,14 +138,14 @@ func TestInitReportInheritsDelegatedNonSuccess(t *testing.T) {
 	if appErr != nil {
 		t.Fatalf("init report: %v", appErr)
 	}
-	if exitCode != contract.ExitValidation {
+	if exitCode != contract.ExitReadySetBlocked {
 		t.Fatalf("expected delegated non-success to fail init, got %d", exitCode)
 	}
 	if !report.Delegated || report.ReadySet == nil {
 		t.Fatalf("expected delegated ready-set report, got %#v", report)
 	}
 	lines := toolchain.RenderInitText(report)
-	if got := lines[0]; got != "Init: delegated ready-set result FAILED" {
+	if got := lines[0]; got != "Init: delegated ready-set result completed_with_blockers" {
 		t.Fatalf("unexpected init headline: %q", got)
 	}
 	if !containsString(report.ManualActions, "run `kstoolchain sync`") {
@@ -138,19 +158,27 @@ func TestSyncReportPassesOptionsToSharedReadySetExecutor(t *testing.T) {
 	svc := New(testServiceContext(home))
 
 	called := false
-	svc.readySetExecutor = func(opts toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+	svc.readySetExecutor = func(opts toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError) {
 		called = true
 		if !opts.AllowDirty {
 			t.Fatalf("expected allow-dirty option to reach shared executor, got %#v", opts)
 		}
-		return toolchain.StatusReport{
-			Schema:        toolchain.StatusReportSchema,
-			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
-			Summary: toolchain.StatusSummary{
-				Overall:     toolchain.StateCurrent,
-				StateCounts: map[string]int{toolchain.StateCurrent: 1},
+		report := toolchain.SyncReport{
+			Schema:  toolchain.SyncReportSchema,
+			Outcome: toolchain.SyncOutcomeNoChange,
+			Summary: toolchain.SyncSummary{
+				ReadyRepoCount: 1,
 			},
-		}, nil, contract.ExitOK, nil
+			FinalStatus: toolchain.StatusReport{
+				Schema:        toolchain.StatusReportSchema,
+				ManagedBinDir: svc.ctx.Config.ManagedBinDir,
+				Summary: toolchain.StatusSummary{
+					Overall:     toolchain.StateCurrent,
+					StateCounts: map[string]int{toolchain.StateCurrent: 1},
+				},
+			},
+		}
+		return report, nil, report.ExitCode(), nil
 	}
 
 	report, warnings, exitCode, appErr := svc.SyncReport(toolchain.SyncOptions{AllowDirty: true})
@@ -166,8 +194,8 @@ func TestSyncReportPassesOptionsToSharedReadySetExecutor(t *testing.T) {
 	if exitCode != contract.ExitOK {
 		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitOK)
 	}
-	if report.Summary.Overall != toolchain.StateCurrent {
-		t.Fatalf("unexpected overall state: %s", report.Summary.Overall)
+	if report.FinalStatus.Summary.Overall != toolchain.StateCurrent {
+		t.Fatalf("unexpected overall state: %s", report.FinalStatus.Summary.Overall)
 	}
 }
 

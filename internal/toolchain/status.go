@@ -160,7 +160,6 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 		}
 		if adapter.Status == AdapterStatusReady {
 			if setup.RepoHead != "" {
-				repoState.RepoHead = setup.RepoHead
 				if repoState.State == StateCurrent && repoState.ActiveBuild != "" && setup.RepoHead != repoState.ActiveBuild {
 					repoState.State = StateStaleLKG
 					if repoState.Reason == "" {
@@ -362,26 +361,6 @@ func StatusExitCode(report StatusReport) int {
 		return contract.ExitOK
 	}
 	return contract.ExitValidation
-}
-
-func SyncExitCode(manifest Manifest, persisted PersistedState) int {
-	if len(SelectReadyAdapters(manifest)) == 0 {
-		return contract.ExitValidation
-	}
-	index := map[string]PersistedRepoState{}
-	for _, repo := range persisted.Repos {
-		index[repo.RepoID] = repo
-	}
-	for _, adapter := range SelectReadyAdapters(manifest) {
-		repo, ok := index[adapter.RepoID]
-		if !ok {
-			return contract.ExitValidation
-		}
-		if normalizedState(repo.State) != StateCurrent {
-			return contract.ExitValidation
-		}
-	}
-	return contract.ExitOK
 }
 
 func normalizedState(raw string) string {

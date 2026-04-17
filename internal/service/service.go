@@ -10,7 +10,7 @@ import (
 
 type Service struct {
 	ctx              *runtime.Context
-	readySetExecutor func(toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError)
+	readySetExecutor func(toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError)
 }
 
 func New(ctx *runtime.Context) *Service {
@@ -41,7 +41,7 @@ func (s *Service) StatusReport() (toolchain.StatusReport, []contract.Warning, in
 	return report, warnings, toolchain.StatusExitCode(report), nil
 }
 
-func (s *Service) SyncReport(opts toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+func (s *Service) SyncReport(opts toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError) {
 	return s.readySetExecutor(opts)
 }
 
@@ -60,35 +60,36 @@ func (s *Service) InitReport(in io.Reader, out io.Writer, opts toolchain.InitOpt
 	}
 	report.Delegated = true
 	report.ReadySet = &readyReport
-	report.ManualActions = append(toolchain.CollectReadySetManualActions(readyReport), report.ManualActions...)
+	report.ManualActions = append(toolchain.CollectSyncManualActions(readyReport), report.ManualActions...)
 	report.ManualActions = dedupeStrings(report.ManualActions)
-	return report, warnings, toolchain.StatusExitCode(readyReport), nil
+	return report, warnings, readyReport.ExitCode(), nil
 }
 
-func (s *Service) executeReadySetSync(opts toolchain.SyncOptions) (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+func (s *Service) executeReadySetSync(opts toolchain.SyncOptions) (toolchain.SyncReport, []contract.Warning, int, *contract.AppError) {
 	manifest, appErr := toolchain.LoadManifest(s.ctx)
 	if appErr != nil {
-		return toolchain.StatusReport{}, nil, contract.ExitValidation, appErr
+		return toolchain.SyncReport{}, nil, contract.ExitValidation, appErr
 	}
 	warnings := toolchain.SyncOverlayWarnings(manifest)
 	if appErr := toolchain.SyncOverlayError(manifest); appErr != nil {
-		return toolchain.StatusReport{}, warnings, appErr.Exit, appErr
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
-	persisted, _, statePresent, _, appErr := toolchain.LoadPersistedState(s.ctx)
+	prePersisted, _, statePresent, _, appErr := toolchain.LoadPersistedState(s.ctx)
 	if appErr != nil {
-		return toolchain.StatusReport{}, warnings, appErr.Exit, appErr
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
-	if appErr := toolchain.SyncReadySet(s.ctx, manifest, persisted, statePresent, opts); appErr != nil {
-		return toolchain.StatusReport{}, warnings, appErr.Exit, appErr
+	if appErr := toolchain.SyncReadySet(s.ctx, manifest, prePersisted, statePresent, opts); appErr != nil {
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
 	readyManifest := manifest
 	readyManifest.Repos = toolchain.SelectReadyAdapters(manifest)
-	persisted, stateFile, statePresent, contractDrift, appErr := toolchain.LoadPersistedState(s.ctx)
+	postPersisted, stateFile, statePresent, contractDrift, appErr := toolchain.LoadPersistedState(s.ctx)
 	if appErr != nil {
-		return toolchain.StatusReport{}, warnings, appErr.Exit, appErr
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
-	report := toolchain.BuildStatusReport(s.ctx, readyManifest, persisted, stateFile, statePresent, contractDrift)
-	return report, warnings, toolchain.SyncExitCode(readyManifest, persisted), nil
+	finalStatus := toolchain.BuildStatusReport(s.ctx, readyManifest, postPersisted, stateFile, statePresent, contractDrift)
+	report := toolchain.BuildSyncReport(prePersisted, postPersisted, finalStatus)
+	return report, warnings, report.ExitCode(), nil
 }
 
 func dedupeStrings(items []string) []string {

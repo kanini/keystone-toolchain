@@ -78,6 +78,9 @@ func TestCLISyncRejectsArgs(t *testing.T) {
 	if code, _ := errShape["code"].(string); code != contract.CodeArgsInvalid {
 		t.Fatalf("unexpected error code: %#v", errShape)
 	}
+	if _, ok := payload["result"]; ok {
+		t.Fatalf("argument failure must not emit a sync result body: %#v", payload)
+	}
 }
 
 func TestCLIStatusJSONReturnsReport(t *testing.T) {
@@ -148,8 +151,78 @@ repos:
 	if code, _ := errShape["code"].(string); code != contract.CodeOverlayUnknown {
 		t.Fatalf("unexpected error code: %#v", errShape)
 	}
+	if _, ok := payload["result"]; ok {
+		t.Fatalf("command-level sync failure must not emit a result body: %#v", payload)
+	}
 	if _, err := os.Stat(filepath.Join(home, ".keystone", "toolchain", "state", "current.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected no current.json write on overlay failure, got err=%v", err)
+	}
+}
+
+func TestCLISyncJSONCompletedWithBlockersUsesResultBearingNonSuccess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	res := runCLI(t, []string{"sync", "--json"})
+	if res.ExitCode != contract.ExitReadySetBlocked {
+		t.Fatalf("unexpected exit code: got=%d want=%d\nstdout=%s\nstderr=%s", res.ExitCode, contract.ExitReadySetBlocked, res.Stdout, res.Stderr)
+	}
+	payload := decodeEnvelope(t, res.Stdout)
+	if ok, _ := payload["ok"].(bool); ok {
+		t.Fatalf("completed_with_blockers must be ok=false: %#v", payload)
+	}
+	if _, ok := payload["error"]; ok {
+		t.Fatalf("completed_with_blockers must not emit a top-level error: %#v", payload)
+	}
+	result, _ := payload["result"].(map[string]any)
+	if schema, _ := result["schema"].(string); schema != "kstoolchain.sync-report/v1alpha1" {
+		t.Fatalf("unexpected sync schema: %#v", result)
+	}
+	if outcome, _ := result["outcome"].(string); outcome != "completed_with_blockers" {
+		t.Fatalf("unexpected sync outcome: %#v", result)
+	}
+	finalStatus, _ := result["final_status"].(map[string]any)
+	if schema, _ := finalStatus["schema"].(string); schema != "kstoolchain.status/v1alpha1" {
+		t.Fatalf("unexpected nested final_status schema: %#v", finalStatus)
+	}
+}
+
+func TestCLISyncJSONSchemaIsStableUnderVerbose(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	res := runCLI(t, []string{"sync", "--json", "--verbose"})
+	payload := decodeEnvelope(t, res.Stdout)
+	result, _ := payload["result"].(map[string]any)
+	if schema, _ := result["schema"].(string); schema != "kstoolchain.sync-report/v1alpha1" {
+		t.Fatalf("unexpected sync schema with --verbose: %#v", result)
+	}
+	if _, ok := result["final_status"]; !ok {
+		t.Fatalf("expected final_status in sync JSON with --verbose: %#v", result)
+	}
+}
+
+func TestCLISyncTextDefaultDiffersFromVerbose(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	defaultRes := runCLI(t, []string{"sync"})
+	if !strings.Contains(defaultRes.Stdout, "Sync: completed_with_blockers") {
+		t.Fatalf("unexpected default sync text: %q", defaultRes.Stdout)
+	}
+	if strings.Contains(defaultRes.Stdout, "Suite:") {
+		t.Fatalf("default sync text must not reuse the broad status dump: %q", defaultRes.Stdout)
+	}
+
+	verboseRes := runCLI(t, []string{"sync", "--verbose"})
+	if !strings.Contains(verboseRes.Stdout, "Final ready-set detail:") {
+		t.Fatalf("expected verbose sync text to widen: %q", verboseRes.Stdout)
+	}
+	if !strings.Contains(verboseRes.Stdout, "Suite:") {
+		t.Fatalf("expected verbose sync text to include status detail: %q", verboseRes.Stdout)
 	}
 }
 

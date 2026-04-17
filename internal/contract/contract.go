@@ -17,21 +17,22 @@ var (
 )
 
 const (
-	CodeArgsInvalid    = "ARGS_INVALID"
-	CodeConfigInvalid  = "CONFIG_INVALID"
-	CodeIOError        = "IO_ERROR"
-	CodeNotImplemented = "NOT_IMPLEMENTED"
-	CodeOverlayMissing = "OVERLAY_MISSING"
-	CodeOverlayUnknown = "OVERLAY_UNKNOWN_REPO"
-	CodeOverlayInvalid = "OVERLAY_INVALID"
-	CodeOverlayIO      = "OVERLAY_UNREADABLE"
-	CodeOverlayDupID   = "OVERLAY_DUPLICATE_REPO"
-	KindValidation     = "validation"
-	KindInfrastructure = "infrastructure"
-	WarningStaleBinary = "STALE_BINARY"
-	ExitOK             = 0
-	ExitValidation     = 1
-	ExitInfrastructure = 12
+	CodeArgsInvalid     = "ARGS_INVALID"
+	CodeConfigInvalid   = "CONFIG_INVALID"
+	CodeIOError         = "IO_ERROR"
+	CodeNotImplemented  = "NOT_IMPLEMENTED"
+	CodeOverlayMissing  = "OVERLAY_MISSING"
+	CodeOverlayUnknown  = "OVERLAY_UNKNOWN_REPO"
+	CodeOverlayInvalid  = "OVERLAY_INVALID"
+	CodeOverlayIO       = "OVERLAY_UNREADABLE"
+	CodeOverlayDupID    = "OVERLAY_DUPLICATE_REPO"
+	KindValidation      = "validation"
+	KindInfrastructure  = "infrastructure"
+	WarningStaleBinary  = "STALE_BINARY"
+	ExitOK              = 0
+	ExitValidation      = 1
+	ExitReadySetBlocked = 2
+	ExitInfrastructure  = 12
 )
 
 type Detail struct {
@@ -199,6 +200,15 @@ func Success(result any, warnings []Warning) Envelope {
 	return Envelope{
 		ContractVersion: ContractVersion,
 		OK:              true,
+		Result:          result,
+		Warnings:        warnings,
+	}
+}
+
+func NonSuccess(result any, warnings []Warning) Envelope {
+	return Envelope{
+		ContractVersion: ContractVersion,
+		OK:              false,
 		Result:          result,
 		Warnings:        warnings,
 	}

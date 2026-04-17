@@ -23,6 +23,10 @@ type app struct {
 	stderr io.Writer
 }
 
+type resultEnvelope interface {
+	EnvelopeOK() bool
+}
+
 type exitError struct {
 	code int
 }
@@ -158,6 +162,7 @@ Text mode is for people. JSON mode is for tools and agents.`,
 
 func (a *app) newSyncCmd() *cobra.Command {
 	var allowDirty bool
+	var verbose bool
 
 	cmd := &cobra.Command{
 		Use:   "sync",
@@ -170,6 +175,7 @@ Sync is intentionally narrow in v1:
 - it writes current.json so status can read the result back truthfully`,
 		Example: `  kstoolchain sync
   kstoolchain sync --allow-dirty
+  kstoolchain sync --verbose
   kstoolchain sync --json`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) != 0 {
@@ -182,15 +188,12 @@ Sync is intentionally narrow in v1:
 				if appErr != nil {
 					return nil, nil, warnings, exitCode, appErr
 				}
-				lines := toolchain.RenderStatusText(report)
-				if exitCode == contract.ExitOK {
-					lines = append(lines, "Hint: Open a new shell or source your rc file to pick up the updated tools.")
-				}
-				return report, lines, warnings, exitCode, nil
+				return report, toolchain.RenderSyncText(report, verbose), warnings, exitCode, nil
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "Allow one-shot suite-wide sync from dirty ready repos")
+	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show ready-set detail in text output")
 	a.addAdaptersFlag(cmd)
 	return cmd
 }
@@ -277,6 +280,10 @@ func (a *app) addAdaptersFlag(cmd *cobra.Command) {
 
 func (a *app) renderSuccess(ctx *runtime.Context, result any, textLines []string, warnings []contract.Warning) {
 	if ctx.IsJSON {
+		if envelopeResult, ok := result.(resultEnvelope); ok && !envelopeResult.EnvelopeOK() {
+			a.writeJSON(contract.NonSuccess(result, warnings))
+			return
+		}
 		a.writeJSON(contract.Success(result, warnings))
 		return
 	}
