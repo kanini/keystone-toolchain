@@ -118,6 +118,7 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 		// persisted-state lookup entirely — any stale state from a previous
 		// ready-set sync (e.g., if the adapter was demoted from ready to candidate)
 		// would be misleading here.
+		var setup RepoSetup
 		if adapter.Status != AdapterStatusReady {
 			repoState.State = StateUnknown
 			if adapter.Status == AdapterStatusBlocked {
@@ -127,7 +128,15 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 			}
 		} else {
 			persistedRepo, hasPersisted := index[adapter.RepoID]
+			setup = classifyRepoSetup(adapter.RepoPath)
 			switch {
+			case setup.State == StateSetupBlocked:
+				repoState.State = StateSetupBlocked
+				repoState.Reason = setup.Reason
+				if stateFilePresent && !contractDrift && hasPersisted {
+					repoState.RepoHead = persistedRepo.RepoHead
+					repoState.ActiveBuild = persistedRepo.ActiveBuild
+				}
 			case contractDrift:
 				repoState.State = StateContractDrift
 				repoState.Reason = "persisted state managed_bin_dir does not match active configuration"
@@ -145,17 +154,19 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 			}
 		}
 		if adapter.Status == AdapterStatusReady {
-			if liveHead, ok := lookupRepoHead(adapter.RepoPath); ok {
-				repoState.RepoHead = liveHead
-				if repoState.State == StateCurrent && repoState.ActiveBuild != "" && liveHead != repoState.ActiveBuild {
+			if setup.RepoHead != "" {
+				repoState.RepoHead = setup.RepoHead
+				if repoState.State == StateCurrent && repoState.ActiveBuild != "" && setup.RepoHead != repoState.ActiveBuild {
 					repoState.State = StateStaleLKG
 					if repoState.Reason == "" {
-						repoState.Reason = fmt.Sprintf("repo HEAD %s is ahead of active build %s", shortValue(liveHead), shortValue(repoState.ActiveBuild))
+						repoState.Reason = fmt.Sprintf("repo HEAD %s is ahead of active build %s", shortValue(setup.RepoHead), shortValue(repoState.ActiveBuild))
 					}
 				}
 			}
-			for _, warning := range missingSupportArtifactWarnings(ctx, adapter, repoState) {
-				repoState.Warnings = append(repoState.Warnings, warning)
+			if repoState.State != StateSetupBlocked {
+				for _, warning := range missingSupportArtifactWarnings(ctx, adapter, repoState) {
+					repoState.Warnings = append(repoState.Warnings, warning)
+				}
 			}
 		}
 
@@ -172,7 +183,7 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 			// PATH resolution is only meaningful for ready adapters that have an
 			// actual managed binary. For candidate and blocked adapters there is no
 			// managed-binary referent yet, so SHADOWED would be semantically wrong.
-			if adapter.Status == AdapterStatusReady {
+			if adapter.Status == AdapterStatusReady && repoState.State != StateSetupBlocked {
 				resolved, err := exec.LookPath(output)
 				if err == nil {
 					item.ResolvedPath = resolved
@@ -308,6 +319,9 @@ func RenderStatusText(report StatusReport) []string {
 		for _, warning := range repo.Warnings {
 			lines = append(lines, fmt.Sprintf("  warning: %s", warning))
 		}
+		if action := repoNextAction(repo, report.ManagedBinDir); action != "" {
+			lines = append(lines, fmt.Sprintf("  next: %s", action))
+		}
 		lines = append(lines, fmt.Sprintf("  repo: %s", repo.RepoPath))
 		if repo.AdapterStatus == AdapterStatusReady {
 			for _, output := range repo.Outputs {
@@ -325,6 +339,17 @@ func RenderStatusText(report StatusReport) []string {
 	}
 
 	return lines
+}
+
+func CollectReadySetManualActions(report StatusReport) []string {
+	actions := []string{}
+	for _, repo := range report.Repos {
+		if repo.AdapterStatus != AdapterStatusReady {
+			continue
+		}
+		actions = appendUniqueStrings(actions, repoNextAction(repo, report.ManagedBinDir))
+	}
+	return actions
 }
 
 func StatusExitCode(report StatusReport) int {
@@ -356,7 +381,7 @@ func SyncExitCode(manifest Manifest, persisted PersistedState) int {
 
 func normalizedState(raw string) string {
 	switch strings.TrimSpace(raw) {
-	case StateCurrent, StateStaleLKG, StateFailed, StateDirtySkipped, StateShadowed, StateContractDrift, StateUnknown:
+	case StateCurrent, StateStaleLKG, StateFailed, StateDirtySkipped, StateShadowed, StateContractDrift, StateSetupBlocked, StateUnknown:
 		return raw
 	default:
 		return StateUnknown
@@ -365,6 +390,9 @@ func normalizedState(raw string) string {
 
 func deriveRepoState(repo RepoStatus) string {
 	state := normalizedState(repo.State)
+	if state == StateSetupBlocked {
+		return state
+	}
 	for _, output := range repo.Outputs {
 		if output.State == StateShadowed {
 			return StateShadowed
@@ -380,7 +408,7 @@ func deriveOverall(counts map[string]int) string {
 	if len(counts) == 0 {
 		return StateUnknown
 	}
-	for _, state := range []string{StateFailed, StateShadowed, StateContractDrift, StateDirtySkipped, StateStaleLKG, StateUnknown} {
+	for _, state := range []string{StateFailed, StateSetupBlocked, StateShadowed, StateContractDrift, StateDirtySkipped, StateStaleLKG, StateUnknown} {
 		if counts[state] > 0 {
 			return state
 		}
@@ -490,4 +518,57 @@ func missingSupportArtifactWarnings(ctx *runtime.Context, adapter RepoAdapter, r
 		}
 	}
 	return warnings
+}
+
+func repoNextAction(repo RepoStatus, managedBinDir string) string {
+	if repo.AdapterStatus != AdapterStatusReady {
+		return ""
+	}
+
+	switch repo.State {
+	case StateSetupBlocked:
+		switch repo.Reason {
+		case SetupReasonRepoPathUnset:
+			return fmt.Sprintf("configure a local repo_path for %s, then run `kstoolchain init`", repo.RepoID)
+		case SetupReasonRepoPathMissing:
+			if repo.RepoPath != "" {
+				return fmt.Sprintf("restore or correct the checkout at %s for %s, then run `kstoolchain init`", repo.RepoPath, repo.RepoID)
+			}
+			return fmt.Sprintf("restore or correct the checkout for %s, then run `kstoolchain init`", repo.RepoID)
+		case SetupReasonRepoPathNotGit:
+			if repo.RepoPath != "" {
+				return fmt.Sprintf("point %s at a Git checkout instead of %s, then run `kstoolchain init`", repo.RepoID, repo.RepoPath)
+			}
+			return fmt.Sprintf("point %s at a Git checkout, then run `kstoolchain init`", repo.RepoID)
+		case SetupReasonRepoPathUnreadable:
+			return fmt.Sprintf("fix permissions for %s, then run `kstoolchain init`", fallbackRepoPath(repo))
+		default:
+			return fmt.Sprintf("fix the repo_path for %s, then run `kstoolchain init`", repo.RepoID)
+		}
+	case StateDirtySkipped:
+		return fmt.Sprintf("clean uncommitted changes in %s, then run `kstoolchain sync`", fallbackRepoPath(repo))
+	case StateFailed, StateStaleLKG:
+		return fmt.Sprintf("fix the build or probe failure for %s, then run `kstoolchain sync`", repo.RepoID)
+	case StateShadowed:
+		for _, output := range repo.Outputs {
+			if output.State == StateShadowed && output.ResolvedPath != "" {
+				return fmt.Sprintf("put %s ahead of %s on PATH, then open a new shell", managedBinDir, output.ResolvedPath)
+			}
+		}
+		return fmt.Sprintf("put %s first on PATH, then open a new shell", managedBinDir)
+	case StateUnknown:
+		for _, output := range repo.Outputs {
+			if output.Reason == "tool is not on PATH" {
+				return fmt.Sprintf("open a new shell or source your rc file so %s wins on PATH", managedBinDir)
+			}
+		}
+	}
+	return ""
+}
+
+func fallbackRepoPath(repo RepoStatus) string {
+	if strings.TrimSpace(repo.RepoPath) != "" {
+		return repo.RepoPath
+	}
+	return repo.RepoID
 }

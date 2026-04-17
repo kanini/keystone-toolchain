@@ -11,34 +11,62 @@ load-bearing seams.
 Current surface:
 
 - `version` reports build provenance in text and JSON
-- `status` loads the tracked adapter manifest, reads persisted state, and audits
-  live PATH resolution
-- `sync` operates on ready adapters only and writes `current.json` after a
-  stage-probe-promote cycle
+- `init` is the canonical first-run command: it bootstraps local toolchain
+  directories, updates shell PATH bootstrap, authors or repairs the thin
+  adapters overlay, and then delegates once into the shared ready-set sync path
+- `status` loads tracked adapter metadata plus the local overlay, reads
+  persisted state, and audits live PATH resolution
+- `sync` is the canonical day-two refresh command: it operates on ready
+  adapters only and writes `current.json` after a stage-probe-promote cycle
 
 Current rollout scope:
 
-- `keystone-hub` and `keystone-memory` are ready adapters
-- candidate and blocked adapters stay visible in `status`
-- `keystone-context` remains blocked until immutable install work lands
+- `keystone-hub` is the only ready adapter in this slice
+- the remaining tracked adapters stay visible in `status` as candidates
+- `sync` judges success on the ready set only
+- if the local overlay does not resolve a ready repo path, that adapter reports
+  `SETUP_BLOCKED` instead of falling through to low-level git failures
 
 ## Configuration
 
-The adapter manifest lives at `internal/toolchain/defaults/adapters.yaml` and
-is embedded in the binary at compile time. The paths in that file are specific
-to one machine. To use kstoolchain with your own repos, edit that file directly
-and rebuild:
+The embedded manifest at `internal/toolchain/defaults/adapters.yaml` now owns
+shared adapter metadata only. Local repo paths live in a thin overlay file:
 
 ```sh
-# edit internal/toolchain/defaults/adapters.yaml
-# set repo_path values to your local checkout locations
-make build
+# default local overlay target
+~/.keystone/toolchain/adapters.yaml
 ```
 
-See `internal/toolchain/defaults/example.adapters.yaml` for a documented
-template showing all fields and supported values.
+Create or refresh that overlay with:
 
-Runtime override of the adapters file is not yet supported — it is planned
-but not implemented.
+```sh
+kstoolchain init
+```
+
+On real runs, `init` bootstraps the local machine first and then delegates once
+into the same ready-set execution path used by `kstoolchain sync`.
+
+Or inspect the proposed changes without writing:
+
+```sh
+kstoolchain init --dry-run
+```
+
+`--dry-run` is preview-only: it does not delegate into sync, does not mutate
+repos, and does not write `current.json`.
+
+After first-run bootstrap succeeds, use:
+
+```sh
+kstoolchain sync
+```
+
+for the normal day-two refresh loop.
+
+`status`, `sync`, and `init` also accept `--adapters <file>` to select an
+alternate thin overlay file for that invocation. The flag does not replace the
+embedded manifest and is not stored in runtime config.
+
+See `internal/toolchain/defaults/example.adapters.yaml` for the overlay shape.
 
 See [docs/foundation-requirements.md](docs/foundation-requirements.md).

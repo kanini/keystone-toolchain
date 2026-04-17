@@ -9,12 +9,13 @@ import (
 )
 
 type Context struct {
-	HomeDir    string
-	ConfigPath string
-	Config     Config
-	Format     string
-	IsJSON     bool
-	Now        func() time.Time
+	HomeDir      string
+	ConfigPath   string
+	Config       Config
+	Format       string
+	IsJSON       bool
+	AdaptersPath string
+	Now          func() time.Time
 }
 
 func BuildContext(opts GlobalOptions) (*Context, *contract.AppError) {
@@ -40,11 +41,12 @@ func BuildContext(opts GlobalOptions) (*Context, *contract.AppError) {
 	}
 
 	return &Context{
-		HomeDir:    home,
-		ConfigPath: cfgPath,
-		Config:     cfg,
-		Format:     format,
-		IsJSON:     format == "json",
-		Now:        time.Now,
+		HomeDir:      home,
+		ConfigPath:   cfgPath,
+		Config:       cfg,
+		Format:       format,
+		IsJSON:       format == "json",
+		AdaptersPath: strings.TrimSpace(opts.AdaptersPath),
+		Now:          time.Now,
 	}, nil
 }

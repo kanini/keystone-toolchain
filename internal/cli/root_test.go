@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,6 +81,8 @@ func TestCLISyncRejectsArgs(t *testing.T) {
 }
 
 func TestCLIStatusJSONReturnsReport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("PATH", "")
 	res := runCLI(t, []string{"status", "--json"})
 	if res.ExitCode != contract.ExitValidation {
@@ -95,6 +99,76 @@ func TestCLIStatusJSONReturnsReport(t *testing.T) {
 	result, _ := payload["result"].(map[string]any)
 	if schema, _ := result["schema"].(string); schema != "kstoolchain.status/v1alpha1" {
 		t.Fatalf("unexpected status schema: %#v", result)
+	}
+}
+
+func TestCLIStatusJSONIncludesOverlayMissingWarning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	res := runCLI(t, []string{"status", "--json"})
+	payload := decodeEnvelope(t, res.Stdout)
+	warnings, _ := payload["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings in payload: %#v", payload)
+	}
+	warning, _ := warnings[0].(map[string]any)
+	if code, _ := warning["code"].(string); code != contract.CodeOverlayMissing {
+		t.Fatalf("unexpected warning code: %#v", warning)
+	}
+}
+
+func TestCLISyncJSONFailsOnUnknownOverlayRow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	overlayPath := filepath.Join(home, ".keystone", "toolchain", "adapters.yaml")
+	if err := os.MkdirAll(filepath.Dir(overlayPath), 0o755); err != nil {
+		t.Fatalf("mkdir overlay dir: %v", err)
+	}
+	if err := os.WriteFile(overlayPath, []byte(`schema: kstoolchain.adapter-overlay/v1alpha1
+repos:
+  - repo_id: stale-repo
+    repo_path: ~/git/stale-repo
+`), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+
+	res := runCLI(t, []string{"sync", "--json"})
+	if res.ExitCode != contract.ExitValidation {
+		t.Fatalf("unexpected exit code: %d\nstdout=%s\nstderr=%s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	payload := decodeEnvelope(t, res.Stdout)
+	if ok, _ := payload["ok"].(bool); ok {
+		t.Fatalf("expected sync failure payload: %#v", payload)
+	}
+	errShape, _ := payload["error"].(map[string]any)
+	if code, _ := errShape["code"].(string); code != contract.CodeOverlayUnknown {
+		t.Fatalf("unexpected error code: %#v", errShape)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".keystone", "toolchain", "state", "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no current.json write on overlay failure, got err=%v", err)
+	}
+}
+
+func TestCLIInitRejectsJSON(t *testing.T) {
+	res := runCLI(t, []string{"init", "--json"})
+	if res.ExitCode != contract.ExitValidation {
+		t.Fatalf("unexpected exit code: got=%d want=%d\nstdout=%s\nstderr=%s", res.ExitCode, contract.ExitValidation, res.Stdout, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stderr) != "" {
+		t.Fatalf("expected empty stderr, got %q", res.Stderr)
+	}
+
+	payload := decodeEnvelope(t, res.Stdout)
+	if ok, _ := payload["ok"].(bool); ok {
+		t.Fatalf("expected init json rejection payload: %#v", payload)
+	}
+	errShape, _ := payload["error"].(map[string]any)
+	if code, _ := errShape["code"].(string); code != contract.CodeArgsInvalid {
+		t.Fatalf("unexpected error code: %#v", errShape)
 	}
 }
 

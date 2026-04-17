@@ -320,6 +320,60 @@ func TestSyncPreflightsSupportArtifactsBeforePromotion(t *testing.T) {
 	}
 }
 
+func TestSyncMarksReadyAdapterSetupBlockedBeforeRepoWork(t *testing.T) {
+	home := t.TempDir()
+	ctx := testContext(home)
+	manifest := Manifest{
+		Schema: "kstoolchain.adapter/v1alpha1",
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        "",
+				InstallCmd:      []string{"/bin/sh", "-c", "exit 99"},
+				ExpectedOutputs: []string{"kshub"},
+				ProbeCmd:        []string{"/bin/sh", "-c", "exit 99"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	prior := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		LastSuccessAt: "2026-04-01T00:00:00Z",
+		Repos: []PersistedRepoState{
+			{
+				RepoID:      "keystone-hub",
+				State:       StateCurrent,
+				Reason:      "",
+				RepoHead:    "deadbeef",
+				ActiveBuild: "cafebabe",
+			},
+		},
+	}
+
+	if appErr := SyncReadySet(ctx, manifest, prior, true); appErr != nil {
+		t.Fatalf("unexpected app error: %v", appErr)
+	}
+	persisted, _, _, _, appErr := LoadPersistedState(ctx)
+	if appErr != nil {
+		t.Fatalf("load state: %v", appErr)
+	}
+	if got := persisted.Repos[0].State; got != StateSetupBlocked {
+		t.Fatalf("unexpected state: %s", got)
+	}
+	if got := persisted.Repos[0].Reason; got != SetupReasonRepoPathUnset {
+		t.Fatalf("unexpected setup reason: %s", got)
+	}
+	if persisted.Repos[0].RepoHead != "deadbeef" || persisted.Repos[0].ActiveBuild != "cafebabe" {
+		t.Fatalf("expected prior build truth to survive setup block, got %#v", persisted.Repos[0])
+	}
+	if persisted.LastSuccessAt != prior.LastSuccessAt {
+		t.Fatalf("expected LastSuccessAt to remain unchanged, got %s", persisted.LastSuccessAt)
+	}
+}
+
 func testContext(home string) *runtime.Context {
 	return &runtime.Context{
 		HomeDir: home,

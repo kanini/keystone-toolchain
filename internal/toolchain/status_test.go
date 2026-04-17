@@ -50,6 +50,7 @@ func TestBuildStatusReportWithoutStateMarksUnknown(t *testing.T) {
 
 func TestBuildStatusReportMarksShadowedPath(t *testing.T) {
 	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
 	pathDir := filepath.Join(home, "path-bin")
 	if err := os.MkdirAll(pathDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -73,7 +74,7 @@ func TestBuildStatusReportMarksShadowedPath(t *testing.T) {
 		Repos: []RepoAdapter{
 			{
 				RepoID:          "keystone-memory",
-				RepoPath:        "/tmp/keystone-memory",
+				RepoPath:        repoPath,
 				ExpectedOutputs: []string{"ksmem"},
 				DirtyPolicy:     "fail_closed",
 				ReleaseUnit:     "repo",
@@ -102,6 +103,7 @@ func TestBuildStatusReportMarksShadowedPath(t *testing.T) {
 
 func TestBuildStatusReportIgnoresCandidateRepoInOverall(t *testing.T) {
 	home := t.TempDir()
+	hubRepo := testGitRepo(t, home)
 	t.Setenv("PATH", "")
 	ctx := &runtime.Context{
 		HomeDir: home,
@@ -116,7 +118,7 @@ func TestBuildStatusReportIgnoresCandidateRepoInOverall(t *testing.T) {
 		Repos: []RepoAdapter{
 			{
 				RepoID:          "keystone-hub",
-				RepoPath:        filepath.Join(home, "hub"),
+				RepoPath:        hubRepo,
 				ExpectedOutputs: []string{"kshub"},
 				DirtyPolicy:     DirtyPolicyFailClosed,
 				ReleaseUnit:     ReleaseUnitRepo,
@@ -269,6 +271,7 @@ func TestSyncExitCodeIgnoresShadowedReadyPath(t *testing.T) {
 
 func TestBuildStatusReportCurrentRequiresManagedPathResolution(t *testing.T) {
 	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
 	t.Setenv("PATH", "")
 
 	ctx := &runtime.Context{
@@ -284,7 +287,7 @@ func TestBuildStatusReportCurrentRequiresManagedPathResolution(t *testing.T) {
 		Repos: []RepoAdapter{
 			{
 				RepoID:          "keystone-hub",
-				RepoPath:        filepath.Join(home, "hub"),
+				RepoPath:        repoPath,
 				ExpectedOutputs: []string{"kshub"},
 				DirtyPolicy:     DirtyPolicyFailClosed,
 				ReleaseUnit:     ReleaseUnitRepo,
@@ -309,8 +312,80 @@ func TestBuildStatusReportCurrentRequiresManagedPathResolution(t *testing.T) {
 	}
 }
 
+func TestBuildStatusReportSetupBlockedPreservesPersistedBuildTruth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", "")
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	manifest := Manifest{
+		Schema: "kstoolchain.adapter/v1alpha1",
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        "",
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{
+				RepoID:      "keystone-hub",
+				State:       StateCurrent,
+				Reason:      "",
+				RepoHead:    "deadbeef",
+				ActiveBuild: "cafebabe",
+			},
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateSetupBlocked {
+		t.Fatalf("expected SETUP_BLOCKED, got %s", got)
+	}
+	if got := report.Repos[0].Reason; got != SetupReasonRepoPathUnset {
+		t.Fatalf("unexpected setup reason: %s", got)
+	}
+	if report.Repos[0].RepoHead != "deadbeef" || report.Repos[0].ActiveBuild != "cafebabe" {
+		t.Fatalf("expected persisted build truth to survive setup block, got %#v", report.Repos[0])
+	}
+	if got := report.Repos[0].Outputs[0].State; got != StateSetupBlocked {
+		t.Fatalf("expected setup-blocked output, got %s", got)
+	}
+	if got := report.Summary.StateCounts[StateSetupBlocked]; got != 1 {
+		t.Fatalf("expected setup-blocked count, got %d", got)
+	}
+	lines := RenderStatusText(report)
+	foundNext := false
+	for _, line := range lines {
+		if strings.Contains(line, "run `kstoolchain init`") {
+			foundNext = true
+			break
+		}
+	}
+	if !foundNext {
+		t.Fatalf("expected setup-blocked status text to point back to init, got %#v", lines)
+	}
+}
+
 func TestBuildStatusReportWarnsWhenSupportArtifactMissing(t *testing.T) {
 	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
+	activeBuild, ok := lookupRepoHead(repoPath)
+	if !ok {
+		t.Fatal("expected repo head")
+	}
 	ctx := &runtime.Context{
 		HomeDir: home,
 		Config: runtime.Config{
@@ -335,7 +410,7 @@ func TestBuildStatusReportWarnsWhenSupportArtifactMissing(t *testing.T) {
 		Repos: []RepoAdapter{
 			{
 				RepoID:           "keystone-context",
-				RepoPath:         filepath.Join(home, "context"),
+				RepoPath:         repoPath,
 				ExpectedOutputs:  []string{"ksctx", "ksctx-plugin-pg"},
 				SupportArtifacts: []string{".ksctx-runtime"},
 				DirtyPolicy:      DirtyPolicyFailClosed,
@@ -351,7 +426,7 @@ func TestBuildStatusReportWarnsWhenSupportArtifactMissing(t *testing.T) {
 			{
 				RepoID:      "keystone-context",
 				State:       StateCurrent,
-				ActiveBuild: "abc1234",
+				ActiveBuild: activeBuild,
 				Outputs:     []string{"ksctx", "ksctx-plugin-pg"},
 			},
 		},
@@ -430,6 +505,7 @@ func TestLoadPersistedStateManagedBinDirDriftReturnsContractDrift(t *testing.T) 
 
 func TestStatusReportsContractDriftOnManagedBinMismatch(t *testing.T) {
 	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
 	t.Setenv("PATH", "")
 	ctx := &runtime.Context{
 		HomeDir: home,
@@ -444,7 +520,7 @@ func TestStatusReportsContractDriftOnManagedBinMismatch(t *testing.T) {
 		Repos: []RepoAdapter{
 			{
 				RepoID:          "keystone-hub",
-				RepoPath:        filepath.Join(home, "hub"),
+				RepoPath:        repoPath,
 				ExpectedOutputs: []string{"kshub"},
 				DirtyPolicy:     DirtyPolicyFailClosed,
 				ReleaseUnit:     ReleaseUnitRepo,
@@ -561,6 +637,16 @@ func TestDeriveOverallRanksFAILEDAboveSHADOWED(t *testing.T) {
 	}
 	if got := deriveOverall(counts); got != StateFailed {
 		t.Fatalf("expected FAILED to outrank SHADOWED, got %s", got)
+	}
+}
+
+func TestDeriveOverallRanksSetupBlockedAboveShadowed(t *testing.T) {
+	counts := map[string]int{
+		StateShadowed:     1,
+		StateSetupBlocked: 1,
+	}
+	if got := deriveOverall(counts); got != StateSetupBlocked {
+		t.Fatalf("expected SETUP_BLOCKED to outrank SHADOWED, got %s", got)
 	}
 }
 

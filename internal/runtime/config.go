@@ -26,6 +26,7 @@ type GlobalOptions struct {
 	JSON          bool
 	ManagedBinDir string
 	StateDir      string
+	AdaptersPath  string
 }
 
 func LoadConfig(home string, opts GlobalOptions) (Config, string, *contract.AppError) {

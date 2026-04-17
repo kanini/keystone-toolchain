@@ -1,9 +1,12 @@
 package toolchain
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kanini/keystone-toolchain/internal/contract"
 	"github.com/kanini/keystone-toolchain/internal/runtime"
 )
 
@@ -19,8 +22,112 @@ func TestLoadManifest(t *testing.T) {
 	if len(manifest.Repos) < 4 {
 		t.Fatalf("expected repo entries, got %d", len(manifest.Repos))
 	}
-	if manifest.ManagedBinDir == "" {
-		t.Fatal("expected managed bin dir")
+	ready := SelectReadyAdapters(manifest)
+	if len(ready) != 1 || ready[0].RepoID != "keystone-hub" {
+		t.Fatalf("expected keystone-hub to be the only ready adapter, got %#v", ready)
+	}
+	if ready[0].RepoPath != "" {
+		t.Fatalf("expected missing default overlay to leave repo_path unset, got %q", ready[0].RepoPath)
+	}
+	if len(manifest.Overlay.Diagnostics) != 1 || manifest.Overlay.Diagnostics[0].Code != contract.CodeOverlayMissing {
+		t.Fatalf("expected OVERLAY_MISSING diagnostic, got %#v", manifest.Overlay.Diagnostics)
+	}
+}
+
+func TestLoadManifestMergesDefaultOverlay(t *testing.T) {
+	home := t.TempDir()
+	ctx := &runtime.Context{HomeDir: home}
+
+	writeOverlayFixture(t, filepath.Join(home, ".keystone", "toolchain", "adapters.yaml"), `schema: kstoolchain.adapter-overlay/v1alpha1
+repos:
+  - repo_id: keystone-hub
+    repo_path: ~/git/keystone-hub
+  - repo_id: keystone-memory
+    repo_path: ~/git/keystone-memory
+`)
+
+	manifest, appErr := LoadManifest(ctx)
+	if appErr != nil {
+		t.Fatalf("load manifest: %v", appErr)
+	}
+
+	paths := map[string]string{}
+	for _, repo := range manifest.Repos {
+		paths[repo.RepoID] = repo.RepoPath
+	}
+	if got := paths["keystone-hub"]; got != filepath.Join(home, "git", "keystone-hub") {
+		t.Fatalf("unexpected hub repo_path: %q", got)
+	}
+	if got := paths["keystone-memory"]; got != filepath.Join(home, "git", "keystone-memory") {
+		t.Fatalf("unexpected memory repo_path: %q", got)
+	}
+}
+
+func TestLoadManifestUsesExplicitOverlaySelection(t *testing.T) {
+	home := t.TempDir()
+	explicitPath := filepath.Join(home, "custom", "adapters.yaml")
+	writeOverlayFixture(t, explicitPath, `schema: kstoolchain.adapter-overlay/v1alpha1
+repos:
+  - repo_id: keystone-hub
+    repo_path: ~/work/hub
+`)
+
+	ctx := &runtime.Context{HomeDir: home, AdaptersPath: explicitPath}
+	manifest, appErr := LoadManifest(ctx)
+	if appErr != nil {
+		t.Fatalf("load manifest: %v", appErr)
+	}
+	var hub RepoAdapter
+	for _, repo := range manifest.Repos {
+		if repo.RepoID == "keystone-hub" {
+			hub = repo
+			break
+		}
+	}
+	if hub.RepoPath != filepath.Join(home, "work", "hub") {
+		t.Fatalf("unexpected explicit repo_path: %q", hub.RepoPath)
+	}
+}
+
+func TestLoadManifestUnknownOverlayRowProducesDiagnostic(t *testing.T) {
+	home := t.TempDir()
+	writeOverlayFixture(t, filepath.Join(home, ".keystone", "toolchain", "adapters.yaml"), `schema: kstoolchain.adapter-overlay/v1alpha1
+repos:
+  - repo_id: keystone-hub
+    repo_path: ~/git/keystone-hub
+  - repo_id: stale-repo
+    repo_path: ~/git/stale-repo
+`)
+
+	manifest, appErr := LoadManifest(&runtime.Context{HomeDir: home})
+	if appErr != nil {
+		t.Fatalf("load manifest: %v", appErr)
+	}
+	if len(manifest.Overlay.UnknownRows) != 1 || manifest.Overlay.UnknownRows[0].RepoID != "stale-repo" {
+		t.Fatalf("unexpected unknown rows: %#v", manifest.Overlay.UnknownRows)
+	}
+	warnings := StatusOverlayWarnings(manifest)
+	if len(warnings) != 1 || warnings[0].Code != contract.CodeOverlayUnknown {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+}
+
+func TestLoadManifestRejectsDuplicateOverlayRepoIDs(t *testing.T) {
+	home := t.TempDir()
+	writeOverlayFixture(t, filepath.Join(home, ".keystone", "toolchain", "adapters.yaml"), `schema: kstoolchain.adapter-overlay/v1alpha1
+repos:
+  - repo_id: keystone-hub
+    repo_path: ~/git/keystone-hub
+  - repo_id: keystone-hub
+    repo_path: ~/git/keystone-hub-two
+`)
+
+	_, appErr := LoadManifest(&runtime.Context{HomeDir: home})
+	if appErr == nil {
+		t.Fatal("expected duplicate overlay repo_id error")
+	}
+	if appErr.Code != contract.CodeOverlayDupID {
+		t.Fatalf("unexpected error code: %s", appErr.Code)
 	}
 }
 
@@ -106,5 +213,15 @@ func TestValidateManifestRejectsUnsafeArtifactPaths(t *testing.T) {
 	}
 	if !strings.Contains(appErr.Message, "must not escape the stage root") {
 		t.Fatalf("unexpected validation message: %q", appErr.Message)
+	}
+}
+
+func writeOverlayFixture(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir overlay dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write overlay: %v", err)
 	}
 }

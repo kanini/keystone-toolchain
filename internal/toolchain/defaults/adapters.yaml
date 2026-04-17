@@ -2,7 +2,6 @@ schema: kstoolchain.adapter/v1alpha1
 managed_bin_dir: ~/.keystone/toolchain/active/bin
 repos:
   - repo_id: keystone-memory
-    repo_path: /Users/rc/git/keystone-memory
     install_cmd:
       - make
       - build-local
@@ -14,13 +13,12 @@ repos:
       - --version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
     notes:
       - Uses staged build output through make build-local BIN_DIR=...
       - build-local added to Makefile to match the hub adapter pattern.
 
   - repo_id: keystone-hub
-    repo_path: /Users/rc/git/keystone-hub
     install_cmd:
       - make
       - build-local
@@ -39,7 +37,6 @@ repos:
       - This repo produced the stale-binary warning that kicked off the work.
 
   - repo_id: keystone-signal
-    repo_path: /Users/rc/git/keystone-signal
     install_cmd:
       - make
       - build
@@ -51,10 +48,9 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
 
   - repo_id: keystone-sentinal
-    repo_path: /Users/rc/git/keystone-sentinal
     install_cmd:
       - make
       - build
@@ -66,10 +62,9 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
 
   - repo_id: keystone-hacker
-    repo_path: /Users/rc/git/keystone-hacker
     install_cmd:
       - make
       - build
@@ -81,12 +76,11 @@ repos:
       - --version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
     notes:
       - Multi-module repo.
 
   - repo_id: keystone-capture
-    repo_path: /Users/rc/git/keystone-capture
     install_cmd:
       - make
       - build
@@ -98,10 +92,9 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
 
   - repo_id: keystone-blueprint
-    repo_path: /Users/rc/git/keystone-blueprint
     install_cmd:
       - make
       - build
@@ -113,12 +106,11 @@ repos:
       - version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
     notes:
       - build also produces install-prompts to stage dir; only ksblueprint is promoted.
 
   - repo_id: keystone-context
-    repo_path: /Users/rc/git/keystone-context
     install_cmd:
       - make
       - build-local
@@ -133,7 +125,7 @@ repos:
       - --version
     dirty_policy: fail_closed
     release_unit: repo
-    status: ready
+    status: candidate
     notes:
       - build-local emits ksctx, ksctx-plugin-pg, and .ksctx-runtime under BIN_DIR.
       - Promotion must keep the hidden runtime directory with the launcher files as one release unit.

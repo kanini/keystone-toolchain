@@ -1,0 +1,39 @@
+recipe_id: 5r6j4d-sync-result-review
+task_kind: investigation
+objective: Review the sync-result contract so `kstoolchain sync` reads like a truthful action result rather than a status dump.
+constraints:
+  - Keep the slice narrow to sync-result contract text/JSON, outcome semantics, `ok`, warnings, next actions, and verbose split.
+  - Do not reopen dirty-policy doctrine, setup/overlay doctrine, init ownership, or rollout expansion.
+  - Treat status as the broad inspection truth surface and sync as the ready-set action-result surface.
+acceptance_criteria:
+  - The pack includes the active 5r6j4d stone, the adjacent settled doctrine that constrains it, and the exact code seams that currently collapse sync into status rendering.
+  - The resulting context is sufficient for an external reviewer to judge truth ownership, cross-surface alignment, default summary scope, and command-level success semantics.
+allowed_paths:
+  - .keystone/
+  - .ctx/
+  - BUILDING.md
+  - README.md
+  - docs/
+  - internal/cli/
+  - internal/contract/
+  - internal/service/
+  - internal/toolchain/
+hints:
+  intent_path: .ctx/recipes/5r6j4d-sync-result-review/intent.md
+  seed_files:
+    - .keystone/stones/active/decision/5/r/5r6j4d-define-sync-result-contract-distinct-from-status.md
+    - .keystone/stones/active/decision/a/2/a2bwaz-revisit-dirty-repo-policy-for-toolchain-sync.md
+    - .keystone/stones/active/task/g/q/gqksyd-generalize-kstoolchain-adapter-manifest-for-mach.md
+    - .keystone/stones/closed/decision/1/s/1sa48m-kstoolchain-v1-surface-and-status-contract.md
+    - .keystone/stones/closed/decision/1/v/1vqbne-define-ownership-boundary-between-kstoolchain-in.md
+    - README.md
+    - BUILDING.md
+    - internal/cli/root.go
+    - internal/contract/contract.go
+    - internal/service/service.go
+    - internal/toolchain/init.go
+    - internal/toolchain/status.go
+budgets:
+  max_tokens: 45000
+  max_files: 14
+policy: default

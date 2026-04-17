@@ -1,0 +1,39 @@
+recipe_id: gqksyd-machine-local-adapter-overlay
+task_kind: investigation
+objective: Review the machine-local adapter-path contract for kstoolchain and prepare deterministic context for external review.
+constraints:
+  - Keep the slice narrow to machine-local adapter path ownership, runtime precedence, init discovery and verification flow, and setup-blocked sync behavior.
+  - Treat tracked adapter metadata as shared repo truth and machine-local repo paths as runtime-local state.
+  - Do not widen the slice into general sync/status rendering or post-install bootstrap hooks.
+acceptance_criteria:
+  - The pack includes repo doctrine, the active stone, adjacent init and prior sync decisions, and the exact runtime/code surfaces that currently own manifest loading.
+  - The pack includes blind-review evidence explaining why build-time embedded repo paths are the wrong runtime contract.
+  - The resulting context is sufficient for an external reviewer to judge overlay-vs-embedded contract, precedence, and partial-configuration behavior.
+allowed_paths:
+  - .keystone/
+  - .ctx/
+  - docs/
+  - README.md
+  - internal/cli/
+  - internal/runtime/
+  - internal/service/
+  - internal/toolchain/
+hints:
+  intent_path: .ctx/recipes/gqksyd-machine-local-adapter-overlay/intent.md
+  seed_files:
+    - CLAUDE.md
+    - docs/foundation-requirements.md
+    - .keystone/stones/closed/decision/1/s/1sa48m-kstoolchain-v1-surface-and-status-contract.md
+    - .keystone/stones/closed/decision/k/f/kfj483-define-rollout-readiness-semantics-for-kstoolcha.md
+    - .keystone/stones/active/task/g/q/gqksyd-generalize-kstoolchain-adapter-manifest-for-mach.md
+    - .keystone/stones/active/task/v/p/vpw661-kstoolchain-init-shell-path-bootstrap-for-first.md
+    - internal/toolchain/defaults/adapters.yaml
+    - internal/toolchain/defaults/example.adapters.yaml
+    - internal/toolchain/manifest.go
+    - internal/runtime/config.go
+    - internal/cli/root.go
+    - internal/service/service.go
+budgets:
+  max_tokens: 22000
+  max_files: 20
+policy: default

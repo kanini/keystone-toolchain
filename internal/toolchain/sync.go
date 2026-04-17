@@ -58,8 +58,16 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 		Outputs: append([]string{}, adapter.ExpectedOutputs...),
 	}
 
-	if repoHead, ok := lookupRepoHead(adapter.RepoPath); ok {
-		repoState.RepoHead = repoHead
+	setup := classifyRepoSetup(adapter.RepoPath)
+	if setup.State == StateSetupBlocked {
+		repoState.State = StateSetupBlocked
+		repoState.Reason = setup.Reason
+		repoState.ActiveBuild = prior.ActiveBuild
+		repoState.RepoHead = prior.RepoHead
+		return repoState
+	}
+	if setup.RepoHead != "" {
+		repoState.RepoHead = setup.RepoHead
 	}
 
 	dirty, reason := repoDirty(adapter.RepoPath)
@@ -134,7 +142,11 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 }
 
 func repoDirty(repoPath string) (bool, string) {
-	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain")
+	gitPath, ok := resolveGitBinary()
+	if !ok {
+		return false, "could not inspect repo dirtiness: git executable not found"
+	}
+	cmd := exec.Command(gitPath, "-C", repoPath, "status", "--porcelain")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Sprintf("could not inspect repo dirtiness: %v", err)

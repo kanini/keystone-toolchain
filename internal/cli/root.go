@@ -18,6 +18,7 @@ import (
 type app struct {
 	root   *cobra.Command
 	opts   runtime.GlobalOptions
+	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
 }
@@ -31,7 +32,7 @@ func (e exitError) Error() string {
 }
 
 func Execute() int {
-	a := newApp(os.Stdout, os.Stderr)
+	a := newAppWithIO(os.Stdin, os.Stdout, os.Stderr)
 	return executeApp(a)
 }
 
@@ -48,7 +49,11 @@ func executeApp(a *app) int {
 }
 
 func newApp(stdout, stderr io.Writer) *app {
-	a := &app{stdout: stdout, stderr: stderr}
+	return newAppWithIO(os.Stdin, stdout, stderr)
+}
+
+func newAppWithIO(stdin io.Reader, stdout, stderr io.Writer) *app {
+	a := &app{stdin: stdin, stdout: stdout, stderr: stderr}
 	root := &cobra.Command{
 		Use:   "kstoolchain",
 		Short: "Keystone toolchain sync and status CLI",
@@ -98,6 +103,7 @@ The scaffold already carries the load-bearing CLI pieces:
 	root.PersistentFlags().StringVar(&a.opts.StateDir, "state-dir", "", "Override state dir")
 
 	root.AddCommand(a.newVersionCmd())
+	root.AddCommand(a.newInitCmd())
 	root.AddCommand(a.newSyncCmd())
 	root.AddCommand(a.newStatusCmd())
 
@@ -141,7 +147,7 @@ Text mode is for people. JSON mode is for tools and agents.`,
 					return nil, nil, nil, contract.ExitValidation, contract.ArgsInvalid("version takes no arguments.", "Run: kstoolchain version")
 				})
 			}
-			return a.runCommand(func(_ *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
+			return a.runCommand(func(ctx *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
 				info := svc.Version()
 				return info, []string{contract.VersionString()}, nil, contract.ExitOK, nil
 			})
@@ -169,18 +175,19 @@ Sync is intentionally narrow in v1:
 				})
 			}
 			return a.runCommand(func(_ *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
-				report, exitCode, appErr := svc.SyncReport()
+				report, warnings, exitCode, appErr := svc.SyncReport()
 				if appErr != nil {
-					return nil, nil, nil, exitCode, appErr
+					return nil, nil, warnings, exitCode, appErr
 				}
 				lines := toolchain.RenderStatusText(report)
 				if exitCode == contract.ExitOK {
 					lines = append(lines, "Hint: Open a new shell or source your rc file to pick up the updated tools.")
 				}
-				return report, lines, nil, exitCode, nil
+				return report, lines, warnings, exitCode, nil
 			})
 		},
 	}
+	a.addAdaptersFlag(cmd)
 	return cmd
 }
 
@@ -203,15 +210,65 @@ Status is the live truth surface:
 				})
 			}
 			return a.runCommand(func(_ *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
-				report, exitCode, appErr := svc.StatusReport()
+				report, warnings, exitCode, appErr := svc.StatusReport()
 				if appErr != nil {
-					return nil, nil, nil, exitCode, appErr
+					return nil, nil, warnings, exitCode, appErr
 				}
-				return report, toolchain.RenderStatusText(report), nil, exitCode, nil
+				return report, toolchain.RenderStatusText(report), warnings, exitCode, nil
 			})
 		},
 	}
+	a.addAdaptersFlag(cmd)
 	return cmd
+}
+
+func (a *app) newInitCmd() *cobra.Command {
+	var dryRun bool
+	var shell string
+
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Prepare first-run machine setup and delegate into the ready set",
+		Long: `Prepare first-run machine setup for kstoolchain.
+
+Init creates or verifies local toolchain directories, updates shell PATH
+bootstrap, authors the thin adapters overlay, and then delegates exactly once
+into the same ready-set sync path used by ` + "`kstoolchain sync`" + `.
+
+Preview-only flows such as --dry-run never delegate and never write current.json.`,
+		Example: `  kstoolchain init
+  kstoolchain init --dry-run
+  kstoolchain init --shell zsh
+  kstoolchain init --adapters ~/tmp/adapters.yaml`,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return a.runCommand(func(_ *runtime.Context, _ *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
+					return nil, nil, nil, contract.ExitValidation, contract.ArgsInvalid("init takes no arguments.", "Run: kstoolchain init")
+				})
+			}
+			return a.runCommand(func(ctx *runtime.Context, svc *service.Service) (any, []string, []contract.Warning, int, *contract.AppError) {
+				if ctx.IsJSON {
+					return nil, nil, nil, contract.ExitValidation, contract.ArgsInvalid("init only supports text output in this slice.", "Run `kstoolchain init` without --json.")
+				}
+				report, warnings, exitCode, appErr := svc.InitReport(a.stdin, a.stdout, toolchain.InitOptions{
+					DryRun: dryRun,
+					Shell:  shell,
+				})
+				if appErr != nil {
+					return nil, nil, warnings, appErr.Exit, appErr
+				}
+				return report, toolchain.RenderInitText(report), warnings, exitCode, nil
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Render discovery and diff without writing the overlay")
+	cmd.Flags().StringVar(&shell, "shell", "", "Override the shell rc target: bash|zsh|sh")
+	a.addAdaptersFlag(cmd)
+	return cmd
+}
+
+func (a *app) addAdaptersFlag(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&a.opts.AdaptersPath, "adapters", "", "Alternate adapters overlay file")
 }
 
 func (a *app) renderSuccess(ctx *runtime.Context, result any, textLines []string, warnings []contract.Warning) {

@@ -1,0 +1,180 @@
+package service
+
+import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kanini/keystone-toolchain/internal/contract"
+	"github.com/kanini/keystone-toolchain/internal/runtime"
+	"github.com/kanini/keystone-toolchain/internal/toolchain"
+)
+
+func TestInitReportDelegatesThroughSharedReadySetExecutor(t *testing.T) {
+	home := t.TempDir()
+	testGitRepo(t, filepath.Join(home, "git", "keystone-hub"))
+	t.Setenv("SHELL", "/bin/bash")
+
+	svc := New(testServiceContext(home))
+	delegateCalls := 0
+	svc.readySetExecutor = func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+		delegateCalls++
+		return toolchain.StatusReport{
+			Schema:        toolchain.StatusReportSchema,
+			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
+			Summary: toolchain.StatusSummary{
+				Overall:     toolchain.StateCurrent,
+				StateCounts: map[string]int{toolchain.StateCurrent: 1},
+			},
+		}, nil, contract.ExitOK, nil
+	}
+
+	var stdout bytes.Buffer
+	report, warnings, exitCode, appErr := svc.InitReport(strings.NewReader("\ny\n"), &stdout, toolchain.InitOptions{})
+	if appErr != nil {
+		t.Fatalf("init report: %v", appErr)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %#v", warnings)
+	}
+	if exitCode != contract.ExitOK {
+		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitOK)
+	}
+	if delegateCalls != 1 {
+		t.Fatalf("expected exactly one shared ready-set call, got %d", delegateCalls)
+	}
+	if !report.Delegated || report.ReadySet == nil {
+		t.Fatalf("expected delegated ready-set report, got %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".keystone", "toolchain", "state", "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected init not to write current.json outside shared sync path, got err=%v", err)
+	}
+}
+
+func TestInitReportDryRunDoesNotDelegateOrWriteState(t *testing.T) {
+	home := t.TempDir()
+	testGitRepo(t, filepath.Join(home, "git", "keystone-hub"))
+	t.Setenv("SHELL", "/bin/bash")
+
+	svc := New(testServiceContext(home))
+	delegateCalls := 0
+	svc.readySetExecutor = func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+		delegateCalls++
+		return toolchain.StatusReport{}, nil, contract.ExitOK, nil
+	}
+
+	var stdout bytes.Buffer
+	report, _, exitCode, appErr := svc.InitReport(strings.NewReader(""), &stdout, toolchain.InitOptions{DryRun: true})
+	if appErr != nil {
+		t.Fatalf("init dry-run: %v", appErr)
+	}
+	if exitCode != contract.ExitOK {
+		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitOK)
+	}
+	if report.Delegated {
+		t.Fatalf("dry-run must not delegate, got %#v", report)
+	}
+	if delegateCalls != 0 {
+		t.Fatalf("dry-run must not call shared ready-set path, got %d calls", delegateCalls)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".keystone", "toolchain", "state", "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no current.json write during dry-run, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".bashrc")); !os.IsNotExist(err) {
+		t.Fatalf("expected dry-run not to write shell rc, got err=%v", err)
+	}
+}
+
+func TestInitReportInheritsDelegatedNonSuccess(t *testing.T) {
+	home := t.TempDir()
+	testGitRepo(t, filepath.Join(home, "git", "keystone-hub"))
+	t.Setenv("SHELL", "/bin/bash")
+
+	svc := New(testServiceContext(home))
+	svc.readySetExecutor = func() (toolchain.StatusReport, []contract.Warning, int, *contract.AppError) {
+		return toolchain.StatusReport{
+			Schema:        toolchain.StatusReportSchema,
+			ManagedBinDir: svc.ctx.Config.ManagedBinDir,
+			Summary: toolchain.StatusSummary{
+				Overall:     toolchain.StateFailed,
+				StateCounts: map[string]int{toolchain.StateFailed: 1},
+			},
+			Repos: []toolchain.RepoStatus{
+				{
+					RepoID:        "keystone-hub",
+					AdapterStatus: toolchain.AdapterStatusReady,
+					State:         toolchain.StateFailed,
+				},
+			},
+		}, nil, contract.ExitOK, nil
+	}
+
+	var stdout bytes.Buffer
+	report, _, exitCode, appErr := svc.InitReport(strings.NewReader("\ny\n"), &stdout, toolchain.InitOptions{})
+	if appErr != nil {
+		t.Fatalf("init report: %v", appErr)
+	}
+	if exitCode != contract.ExitValidation {
+		t.Fatalf("expected delegated non-success to fail init, got %d", exitCode)
+	}
+	if !report.Delegated || report.ReadySet == nil {
+		t.Fatalf("expected delegated ready-set report, got %#v", report)
+	}
+	lines := toolchain.RenderInitText(report)
+	if got := lines[0]; got != "Init: delegated ready-set result FAILED" {
+		t.Fatalf("unexpected init headline: %q", got)
+	}
+	if !containsString(report.ManualActions, "run `kstoolchain sync`") {
+		t.Fatalf("expected delegated next action to name sync, got %#v", report.ManualActions)
+	}
+}
+
+func containsString(items []string, needle string) bool {
+	for _, item := range items {
+		if strings.Contains(item, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func testServiceContext(home string) *runtime.Context {
+	return &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+		Now: func() time.Time {
+			return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+		},
+	}
+}
+
+func testGitRepo(t *testing.T, repoPath string) {
+	t.Helper()
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	runCmd(t, repoPath, "git", "init")
+	runCmd(t, repoPath, "git", "config", "user.email", "test@example.com")
+	runCmd(t, repoPath, "git", "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(repoPath, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	runCmd(t, repoPath, "git", "add", "README.md")
+	runCmd(t, repoPath, "git", "commit", "-m", "init")
+}
+
+func runCmd(t *testing.T, dir string, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%s %v: %v\n%s", name, args, err, string(out))
+	}
+}

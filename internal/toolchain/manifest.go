@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -26,9 +27,10 @@ const (
 )
 
 type Manifest struct {
-	Schema        string        `yaml:"schema" json:"schema"`
-	ManagedBinDir string        `yaml:"managed_bin_dir" json:"managed_bin_dir"`
-	Repos         []RepoAdapter `yaml:"repos" json:"repos"`
+	Schema        string           `yaml:"schema" json:"schema"`
+	ManagedBinDir string           `yaml:"managed_bin_dir" json:"managed_bin_dir"`
+	Repos         []RepoAdapter    `yaml:"repos" json:"repos"`
+	Overlay       OverlaySelection `yaml:"-" json:"-"`
 }
 
 type RepoAdapter struct {
@@ -49,37 +51,51 @@ type RepoAdapter struct {
 }
 
 func LoadManifest(ctx *runtime.Context) (Manifest, *contract.AppError) {
+	manifest, knownRepoIDs, appErr := loadTrackedManifest()
+	if appErr != nil {
+		return Manifest{}, appErr
+	}
+
+	overlay, appErr := loadOverlaySelection(ctx, knownRepoIDs, overlayLoadOptions{
+		allowMissing:       false,
+		emitMissingWarning: true,
+	})
+	if appErr != nil {
+		return Manifest{}, appErr
+	}
+
+	manifest.Overlay = overlay
+	for i := range manifest.Repos {
+		manifest.Repos[i].RepoPath = overlay.Entries[manifest.Repos[i].RepoID]
+	}
+	return manifest, nil
+}
+
+func loadTrackedManifest() (Manifest, map[string]struct{}, *contract.AppError) {
 	var manifest Manifest
 	if err := yaml.Unmarshal(defaultManifestBytes, &manifest); err != nil {
-		return Manifest{}, contract.Infra(contract.CodeIOError, "Default adapter manifest is invalid.", "Fix the embedded manifest.", err)
+		return Manifest{}, nil, contract.Infra(contract.CodeIOError, "Default adapter manifest is invalid.", "Fix the embedded manifest.", err)
 	}
-	managedBinDir, err := runtime.NormalizePath(manifest.ManagedBinDir, ctx.HomeDir)
-	if err != nil {
-		return Manifest{}, contract.Validation(contract.CodeConfigInvalid, "Default adapter manifest managed_bin_dir is invalid.", "Fix the embedded adapter manifest.")
-	}
-	manifest.ManagedBinDir = managedBinDir
 	for i := range manifest.Repos {
-		repoPath, err := runtime.NormalizePath(manifest.Repos[i].RepoPath, ctx.HomeDir)
-		if err != nil {
-			return Manifest{}, contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s repo_path is invalid.", manifest.Repos[i].RepoID), "Fix the embedded adapter manifest.")
-		}
-		manifest.Repos[i].RepoPath = repoPath
 		manifest.Repos[i].Status = normalizeAdapterStatus(manifest.Repos[i].Status)
 		manifest.Repos[i].DirtyPolicy = normalizeDirtyPolicy(manifest.Repos[i].DirtyPolicy)
 		manifest.Repos[i].ReleaseUnit = normalizeReleaseUnit(manifest.Repos[i].ReleaseUnit)
+		manifest.Repos[i].RepoPath = ""
 	}
 	if appErr := validateManifest(manifest); appErr != nil {
-		return Manifest{}, appErr
+		return Manifest{}, nil, appErr
 	}
-	return manifest, nil
+
+	knownRepoIDs := make(map[string]struct{}, len(manifest.Repos))
+	for _, repo := range manifest.Repos {
+		knownRepoIDs[repo.RepoID] = struct{}{}
+	}
+	return manifest, knownRepoIDs, nil
 }
 
 func validateManifest(manifest Manifest) *contract.AppError {
 	if strings.TrimSpace(manifest.Schema) != "kstoolchain.adapter/v1alpha1" {
 		return contract.Validation(contract.CodeConfigInvalid, "Adapter manifest schema must be kstoolchain.adapter/v1alpha1.", "Fix the embedded adapter manifest.")
-	}
-	if strings.TrimSpace(manifest.ManagedBinDir) == "" {
-		return contract.Validation(contract.CodeConfigInvalid, "Adapter manifest managed_bin_dir is required.", "Fix the embedded adapter manifest.")
 	}
 	if len(manifest.Repos) == 0 {
 		return contract.Validation(contract.CodeConfigInvalid, "Adapter manifest must declare at least one repo.", "Fix the embedded adapter manifest.")
@@ -89,8 +105,6 @@ func validateManifest(manifest Manifest) *contract.AppError {
 		switch {
 		case strings.TrimSpace(repo.RepoID) == "":
 			return contract.Validation(contract.CodeConfigInvalid, "Adapter repo_id is required.", "Fix the embedded adapter manifest.")
-		case strings.TrimSpace(repo.RepoPath) == "":
-			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s is missing repo_path.", repo.RepoID), "Fix the embedded adapter manifest.")
 		case repo.Status == "":
 			return contract.Validation(contract.CodeConfigInvalid, fmt.Sprintf("Adapter %s must declare a valid status.", repo.RepoID), "Fix the embedded adapter manifest.")
 		case repo.DirtyPolicy == "":
@@ -167,6 +181,67 @@ func validateArtifactPaths(repoID, field string, items []string) *contract.AppEr
 		}
 	}
 	return nil
+}
+
+func StatusOverlayWarnings(manifest Manifest) []contract.Warning {
+	return overlayWarnings(manifest, true)
+}
+
+func SyncOverlayWarnings(manifest Manifest) []contract.Warning {
+	return overlayWarnings(manifest, false)
+}
+
+func SyncOverlayError(manifest Manifest) *contract.AppError {
+	if len(manifest.Overlay.UnknownRows) == 0 {
+		return nil
+	}
+	repoIDs := make([]string, 0, len(manifest.Overlay.UnknownRows))
+	details := []contract.Detail{{Name: "path", Value: manifest.Overlay.Path}}
+	for _, row := range manifest.Overlay.UnknownRows {
+		repoIDs = append(repoIDs, row.RepoID)
+		details = append(details, contract.Detail{Name: "repo_id", Value: row.RepoID})
+	}
+	sort.Strings(repoIDs)
+	return contract.Validation(
+		contract.CodeOverlayUnknown,
+		fmt.Sprintf("Adapters overlay contains unknown repo_ids: %s.", strings.Join(repoIDs, ", ")),
+		"Remove the stale rows or rerun `kstoolchain init` before syncing.",
+		details...,
+	)
+}
+
+func overlayWarnings(manifest Manifest, includeUnknown bool) []contract.Warning {
+	warnings := []contract.Warning{}
+	hasMissing := false
+	for _, diag := range manifest.Overlay.Diagnostics {
+		switch diag.Code {
+		case contract.CodeOverlayMissing:
+			if hasMissing {
+				continue
+			}
+			hasMissing = true
+			warnings = append(warnings, contract.Warning{
+				Code:    contract.CodeOverlayMissing,
+				Message: fmt.Sprintf("Adapters overlay file is missing: %s", manifest.Overlay.Path),
+				Hint:    "Run `kstoolchain init` to create the local repo-path overlay.",
+			})
+		}
+	}
+
+	if includeUnknown && len(manifest.Overlay.UnknownRows) > 0 {
+		repoIDs := make([]string, 0, len(manifest.Overlay.UnknownRows))
+		for _, row := range manifest.Overlay.UnknownRows {
+			repoIDs = append(repoIDs, row.RepoID)
+		}
+		sort.Strings(repoIDs)
+		warnings = append(warnings, contract.Warning{
+			Code:    contract.CodeOverlayUnknown,
+			Message: fmt.Sprintf("Adapters overlay contains unknown repo_ids: %s.", strings.Join(repoIDs, ", ")),
+			Hint:    "Remove the stale rows or rerun `kstoolchain init` to rewrite the overlay.",
+		})
+	}
+
+	return warnings
 }
 
 func normalizeAdapterStatus(raw string) string {
