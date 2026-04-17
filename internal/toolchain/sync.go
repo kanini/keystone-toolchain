@@ -24,18 +24,34 @@ type repoObservation struct {
 }
 
 func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState, priorPresent bool, opts SyncOptions) *contract.AppError {
+	attempt, appErr := BeginSyncAttempt(ctx, SelectReadyAdapters(manifest), prior.CommittedAttemptID)
+	if appErr != nil {
+		return appErr
+	}
+	return syncReadySet(ctx, manifest, prior, priorPresent, opts, attempt)
+}
+
+func SyncReadySetWithAttempt(ctx *runtime.Context, manifest Manifest, prior PersistedState, priorPresent bool, opts SyncOptions, attempt *SyncAttemptController) *contract.AppError {
+	return syncReadySet(ctx, manifest, prior, priorPresent, opts, attempt)
+}
+
+func syncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState, priorPresent bool, opts SyncOptions, attempt *SyncAttemptController) *contract.AppError {
 	ready := SelectReadyAdapters(manifest)
 	if len(ready) == 0 {
 		return contract.Validation(contract.CodeConfigInvalid, "Adapter manifest does not declare any ready adapters.", "Mark at least one adapter ready before running sync.")
 	}
+	if attempt == nil {
+		return contract.Infra(contract.CodeIOError, "Sync attempt controller is required.", "Retry the command through the shared sync service.", nil)
+	}
 
 	now := ctx.Now().UTC().Format("2006-01-02T15:04:05Z")
 	next := PersistedState{
-		Schema:        PersistedStateSchema,
-		ManagedBinDir: ctx.Config.ManagedBinDir,
-		LastAttemptAt: now,
-		LastSuccessAt: prior.LastSuccessAt,
-		Repos:         make([]PersistedRepoState, 0, len(ready)),
+		Schema:             PersistedStateSchema,
+		ManagedBinDir:      ctx.Config.ManagedBinDir,
+		LastAttemptAt:      now,
+		LastSuccessAt:      prior.LastSuccessAt,
+		CommittedAttemptID: attempt.AttemptID(),
+		Repos:              make([]PersistedRepoState, 0, len(ready)),
 	}
 
 	priorIndex := map[string]PersistedRepoState{}
@@ -47,7 +63,10 @@ func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState,
 
 	allSucceeded := true
 	for _, adapter := range ready {
-		repoState := syncReadyAdapter(ctx, adapter, priorIndex[adapter.RepoID], opts)
+		repoState, appErr := syncReadyAdapter(ctx, adapter, priorIndex[adapter.RepoID], opts, attempt)
+		if appErr != nil {
+			return appErr
+		}
 		if repoState.State != StateCurrent {
 			allSucceeded = false
 		}
@@ -58,10 +77,13 @@ func SyncReadySet(ctx *runtime.Context, manifest Manifest, prior PersistedState,
 	}
 
 	_, appErr := SavePersistedState(ctx, next)
-	return appErr
+	if appErr != nil {
+		return appErr
+	}
+	return attempt.ClearCarriedAfterCommit()
 }
 
-func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior PersistedRepoState, opts SyncOptions) PersistedRepoState {
+func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior PersistedRepoState, opts SyncOptions, attempt *SyncAttemptController) (PersistedRepoState, *contract.AppError) {
 	repoState := PersistedRepoState{
 		RepoID:  adapter.RepoID,
 		Outputs: append([]string{}, adapter.ExpectedOutputs...),
@@ -73,28 +95,28 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 		repoState.Reason = setup.Reason
 		copyClassifiedInputPair(&repoState, prior)
 		copyActiveBuildPair(&repoState, prior)
-		return repoState
+		return repoState, nil
 	}
 
 	classified, reason := observeRepoSource(adapter.RepoPath)
 	if reason != "" {
 		copyClassifiedInputPair(&repoState, prior)
 		applyFailureState(&repoState, prior, truncateReason(reason))
-		return repoState
+		return repoState, nil
 	}
 	setClassifiedInputPair(&repoState, classified.Head, classified.SourceKind)
 	if classified.SourceKind == SourceKindDirtyWorktree && !opts.AllowDirty {
 		repoState.State = StateDirtySkipped
 		repoState.Reason = dirtyRepoReason()
 		copyActiveBuildPair(&repoState, prior)
-		return repoState
+		return repoState, nil
 	}
 
 	stageRoot := filepath.Join(ctx.Config.StateDir, "staging", fmt.Sprintf("%s-%s", adapter.RepoID, ctx.Now().UTC().Format("20060102T150405.000000000Z")))
 	stageBin := filepath.Join(stageRoot, "bin")
 	if err := os.MkdirAll(stageBin, 0o755); err != nil {
 		applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not create stage dir: %v", err)))
-		return repoState
+		return repoState, nil
 	}
 	defer os.RemoveAll(stageRoot)
 
@@ -106,57 +128,62 @@ func syncReadyAdapter(ctx *runtime.Context, adapter RepoAdapter, prior Persisted
 	installCmd, appErr := expandCommandArgs(adapter.InstallCmd, vars)
 	if appErr != nil {
 		applyFailureState(&repoState, prior, appErr.Message)
-		return repoState
+		return repoState, nil
 	}
 	if output, err := runRepoCommand(adapter.RepoPath, installCmd, adapter.Env); err != nil {
 		applyFailureState(&repoState, prior, commandFailureReason("install", output, err))
-		return repoState
+		return repoState, nil
 	}
 
 	artifacts := promotedArtifacts(adapter)
 	for _, artifact := range artifacts {
 		if _, err := os.Stat(filepath.Join(stageBin, artifact)); err != nil {
 			applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("expected staged artifact %s is missing", artifact)))
-			return repoState
+			return repoState, nil
 		}
 	}
 
 	probeCmd, appErr := expandCommandArgs(adapter.ProbeCmd, vars)
 	if appErr != nil {
 		applyFailureState(&repoState, prior, appErr.Message)
-		return repoState
+		return repoState, nil
 	}
 	if output, err := runRepoCommand(adapter.RepoPath, probeCmd, adapter.Env); err != nil {
 		applyFailureState(&repoState, prior, commandFailureReason("probe", output, err))
-		return repoState
+		return repoState, nil
 	}
 
 	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
 		applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not create managed bin dir: %v", err)))
-		return repoState
+		return repoState, nil
 	}
 
 	promotionObservation, reason := observeRepoSource(adapter.RepoPath)
 	if reason != "" {
 		applyFailureState(&repoState, prior, truncateReason(reason))
-		return repoState
+		return repoState, nil
 	}
 	if reason := validatePromotionBoundary(classified, promotionObservation); reason != "" {
 		applyFailureState(&repoState, prior, reason)
-		return repoState
+		return repoState, nil
+	}
+	if len(artifacts) > 0 {
+		if appErr := attempt.EnsurePromotionOrLater(); appErr != nil {
+			return repoState, appErr
+		}
 	}
 	for _, artifact := range artifacts {
 		source := filepath.Join(stageBin, artifact)
 		target := filepath.Join(ctx.Config.ManagedBinDir, artifact)
 		if err := promotePath(source, target, os.Rename); err != nil {
 			applyFailureState(&repoState, prior, truncateReason(fmt.Sprintf("could not promote %s: %v", artifact, err)))
-			return repoState
+			return repoState, nil
 		}
 	}
 
 	repoState.State = StateCurrent
 	setActiveBuildPair(&repoState, classified.Head, classified.SourceKind)
-	return repoState
+	return repoState, nil
 }
 
 func observeRepoSource(repoPath string) (repoObservation, string) {

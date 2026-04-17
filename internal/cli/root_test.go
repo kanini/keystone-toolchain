@@ -159,6 +159,39 @@ repos:
 	}
 }
 
+func TestCLISyncJSONFailsClosedOnInvalidAttemptArtifact(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	stateDir := filepath.Join(home, ".keystone", "toolchain", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "attempt.json"), []byte("{invalid\n"), 0o644); err != nil {
+		t.Fatalf("write invalid attempt artifact: %v", err)
+	}
+
+	res := runCLI(t, []string{"sync", "--json"})
+	if res.ExitCode != contract.ExitValidation {
+		t.Fatalf("unexpected exit code: %d\nstdout=%s\nstderr=%s", res.ExitCode, res.Stdout, res.Stderr)
+	}
+	payload := decodeEnvelope(t, res.Stdout)
+	if ok, _ := payload["ok"].(bool); ok {
+		t.Fatalf("expected sync failure payload: %#v", payload)
+	}
+	errShape, _ := payload["error"].(map[string]any)
+	if code, _ := errShape["code"].(string); code != contract.CodeConfigInvalid {
+		t.Fatalf("unexpected error code: %#v", errShape)
+	}
+	if _, ok := payload["result"]; ok {
+		t.Fatalf("invalid attempt artifact must not emit a sync result body: %#v", payload)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid attempt artifact must block current.json writes, got err=%v", err)
+	}
+}
+
 func TestCLISyncJSONCompletedWithBlockersUsesResultBearingNonSuccess(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

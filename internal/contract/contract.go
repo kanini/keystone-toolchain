@@ -26,6 +26,7 @@ const (
 	CodeOverlayInvalid  = "OVERLAY_INVALID"
 	CodeOverlayIO       = "OVERLAY_UNREADABLE"
 	CodeOverlayDupID    = "OVERLAY_DUPLICATE_REPO"
+	CodeSyncBusy        = "SYNC_IN_PROGRESS"
 	KindValidation      = "validation"
 	KindInfrastructure  = "infrastructure"
 	WarningStaleBinary  = "STALE_BINARY"

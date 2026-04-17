@@ -30,11 +30,12 @@ const (
 )
 
 type PersistedState struct {
-	Schema        string               `json:"schema"`
-	ManagedBinDir string               `json:"managed_bin_dir"`
-	LastAttemptAt string               `json:"last_attempt_at,omitempty"`
-	LastSuccessAt string               `json:"last_success_at,omitempty"`
-	Repos         []PersistedRepoState `json:"repos"`
+	Schema             string               `json:"schema"`
+	ManagedBinDir      string               `json:"managed_bin_dir"`
+	LastAttemptAt      string               `json:"last_attempt_at,omitempty"`
+	LastSuccessAt      string               `json:"last_success_at,omitempty"`
+	CommittedAttemptID string               `json:"committed_attempt_id,omitempty"`
+	Repos              []PersistedRepoState `json:"repos"`
 }
 
 type PersistedRepoState struct {
@@ -49,14 +50,15 @@ type PersistedRepoState struct {
 }
 
 type StatusReport struct {
-	Schema           string        `json:"schema"`
-	Summary          StatusSummary `json:"summary"`
-	ManagedBinDir    string        `json:"managed_bin_dir"`
-	StateFile        string        `json:"state_file"`
-	StateFilePresent bool          `json:"state_file_present"`
-	LastAttemptAt    string        `json:"last_attempt_at,omitempty"`
-	LastSuccessAt    string        `json:"last_success_at,omitempty"`
-	Repos            []RepoStatus  `json:"repos"`
+	Schema           string                  `json:"schema"`
+	Summary          StatusSummary           `json:"summary"`
+	ManagedBinDir    string                  `json:"managed_bin_dir"`
+	StateFile        string                  `json:"state_file"`
+	StateFilePresent bool                    `json:"state_file_present"`
+	LastAttemptAt    string                  `json:"last_attempt_at,omitempty"`
+	LastSuccessAt    string                  `json:"last_success_at,omitempty"`
+	AttemptIntegrity *AttemptIntegrityStatus `json:"attempt_integrity,omitempty"`
+	Repos            []RepoStatus            `json:"repos"`
 }
 
 type StatusSummary struct {
@@ -224,6 +226,10 @@ func BuildStatusReport(ctx *runtime.Context, manifest Manifest, persisted Persis
 	}
 
 	report.Summary.Overall = deriveOverall(report.Summary.StateCounts)
+	report.AttemptIntegrity = ProjectAttemptIntegrity(ctx, persisted.CommittedAttemptID)
+	if report.AttemptIntegrity != nil && report.Summary.Overall == StateCurrent {
+		report.Summary.Overall = StateUnknown
+	}
 	return report
 }
 
@@ -274,27 +280,8 @@ func SavePersistedState(ctx *runtime.Context, persisted PersistedState) (string,
 		return "", appErr
 	}
 
-	tmpFile, err := os.CreateTemp(ctx.Config.StateDir, "current-*.tmp")
-	if err != nil {
-		return "", contract.Infra(contract.CodeIOError, "Could not create temp state file.", "Check permissions for the state dir and retry.", err, contract.Detail{Name: "path", Value: ctx.Config.StateDir})
-	}
-	tmpPath := tmpFile.Name()
-	enc := json.NewEncoder(tmpFile)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(persisted); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return "", contract.Infra(contract.CodeIOError, "Could not encode toolchain state file.", "Retry after fixing the state payload.", err, contract.Detail{Name: "path", Value: tmpPath})
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", contract.Infra(contract.CodeIOError, "Could not close temp state file.", "Retry after checking filesystem health.", err, contract.Detail{Name: "path", Value: tmpPath})
-	}
-
 	stateFile := filepath.Join(ctx.Config.StateDir, "current.json")
-	if err := os.Rename(tmpPath, stateFile); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := writeJSONAtomically(stateFile, persisted, true); err != nil {
 		return "", contract.Infra(contract.CodeIOError, "Could not atomically write toolchain state file.", "Check that the state dir is writable and retry.", err, contract.Detail{Name: "path", Value: stateFile})
 	}
 
@@ -302,8 +289,12 @@ func SavePersistedState(ctx *runtime.Context, persisted PersistedState) (string,
 }
 
 func RenderStatusText(report StatusReport) []string {
+	suiteLine := fmt.Sprintf("Suite: %s", report.Summary.Overall)
+	if report.AttemptIntegrity != nil {
+		suiteLine = fmt.Sprintf("%s (attempt integrity reduced)", suiteLine)
+	}
 	lines := []string{
-		fmt.Sprintf("Suite: %s", report.Summary.Overall),
+		suiteLine,
 		fmt.Sprintf("Managed bin: %s", report.ManagedBinDir),
 		fmt.Sprintf("State file: %s", report.StateFile),
 	}
@@ -312,6 +303,38 @@ func RenderStatusText(report StatusReport) []string {
 	}
 	if report.LastSuccessAt != "" {
 		lines = append(lines, fmt.Sprintf("Last success: %s", report.LastSuccessAt))
+	}
+	if report.AttemptIntegrity != nil {
+		lines = append(lines, fmt.Sprintf("Attempt integrity: %s", report.AttemptIntegrity.State))
+		if report.AttemptIntegrity.Reason != "" {
+			lines = append(lines, fmt.Sprintf("  reason: %s", report.AttemptIntegrity.Reason))
+		}
+		if report.AttemptIntegrity.StartedAt != "" {
+			lines = append(lines, fmt.Sprintf("  started: %s", report.AttemptIntegrity.StartedAt))
+		}
+		if report.AttemptIntegrity.AttemptID != "" {
+			lines = append(lines, fmt.Sprintf("  attempt_id: %s", report.AttemptIntegrity.AttemptID))
+		}
+		if report.AttemptIntegrity.Phase != "" || report.AttemptIntegrity.CarriedUnresolvedPhase != "" {
+			phaseLine := fmt.Sprintf("  phase: %s", report.AttemptIntegrity.Phase)
+			if report.AttemptIntegrity.CarriedUnresolvedPhase != "" {
+				phaseLine = fmt.Sprintf("%s  carried=%s", phaseLine, report.AttemptIntegrity.CarriedUnresolvedPhase)
+			}
+			lines = append(lines, phaseLine)
+		}
+		if report.AttemptIntegrity.OwnerHost != "" || report.AttemptIntegrity.OwnerPID != 0 {
+			owner := strings.TrimSpace(report.AttemptIntegrity.OwnerHost)
+			if owner == "" {
+				owner = "unknown"
+			}
+			if report.AttemptIntegrity.OwnerPID != 0 {
+				owner = fmt.Sprintf("%s pid=%d", owner, report.AttemptIntegrity.OwnerPID)
+			}
+			lines = append(lines, fmt.Sprintf("  owner: %s", owner))
+		}
+		if action := attemptIntegrityNextAction(report); action != "" {
+			lines = append(lines, fmt.Sprintf("  next: %s", action))
+		}
 	}
 	lines = append(lines, fmt.Sprintf("Repos: %d | Managed outputs: %d | Blocked adapters: %d", report.Summary.RepoCount, report.Summary.OutputCount, report.Summary.BlockedRepoCount))
 
@@ -357,7 +380,7 @@ func CollectReadySetManualActions(report StatusReport) []string {
 }
 
 func StatusExitCode(report StatusReport) int {
-	if report.Summary.Overall == StateCurrent {
+	if report.Summary.Overall == StateCurrent && report.AttemptIntegrity == nil {
 		return contract.ExitOK
 	}
 	return contract.ExitValidation
@@ -628,4 +651,18 @@ func fallbackRepoPath(repo RepoStatus) string {
 		return repo.RepoPath
 	}
 	return repo.RepoID
+}
+
+func attemptIntegrityNextAction(report StatusReport) string {
+	if report.AttemptIntegrity == nil {
+		return ""
+	}
+	switch report.AttemptIntegrity.State {
+	case AttemptIntegrityArtifactBad:
+		return fmt.Sprintf("fix or remove %s, then run `kstoolchain sync`", filepath.Join(filepath.Dir(report.StateFile), syncAttemptFileName))
+	case AttemptIntegrityPrePromotion, AttemptIntegrityPromotionLate:
+		return "run `kstoolchain sync` again to re-establish committed suite truth"
+	default:
+		return ""
+	}
 }

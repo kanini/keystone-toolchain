@@ -74,15 +74,30 @@ func (s *Service) executeReadySetSync(opts toolchain.SyncOptions) (toolchain.Syn
 	if appErr := toolchain.SyncOverlayError(manifest); appErr != nil {
 		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
+	readyManifest := manifest
+	readyManifest.Repos = toolchain.SelectReadyAdapters(manifest)
+	if len(readyManifest.Repos) == 0 {
+		appErr := contract.Validation(contract.CodeConfigInvalid, "Adapter manifest does not declare any ready adapters.", "Mark at least one adapter ready before running sync.")
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
+	}
+
+	lock, appErr := toolchain.AcquireSyncLock(s.ctx)
+	if appErr != nil {
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
+	}
+	defer lock.Close()
+
 	prePersisted, _, statePresent, _, appErr := toolchain.LoadPersistedState(s.ctx)
 	if appErr != nil {
 		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
-	if appErr := toolchain.SyncReadySet(s.ctx, manifest, prePersisted, statePresent, opts); appErr != nil {
+	attempt, appErr := toolchain.BeginSyncAttempt(s.ctx, readyManifest.Repos, prePersisted.CommittedAttemptID)
+	if appErr != nil {
 		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
 	}
-	readyManifest := manifest
-	readyManifest.Repos = toolchain.SelectReadyAdapters(manifest)
+	if appErr := toolchain.SyncReadySetWithAttempt(s.ctx, manifest, prePersisted, statePresent, opts, attempt); appErr != nil {
+		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr
+	}
 	postPersisted, stateFile, statePresent, contractDrift, appErr := toolchain.LoadPersistedState(s.ctx)
 	if appErr != nil {
 		return toolchain.SyncReport{}, warnings, appErr.Exit, appErr

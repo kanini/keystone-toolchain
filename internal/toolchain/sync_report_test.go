@@ -199,3 +199,35 @@ func TestRenderSyncTextDefaultAndVerboseDiffer(t *testing.T) {
 		t.Fatalf("verbose sync text should widen to final status detail: %s", verboseText)
 	}
 }
+
+func TestBuildSyncReportTreatsAttemptIntegrityReducedFinalStatusAsBlocked(t *testing.T) {
+	report := BuildSyncReport(
+		PersistedState{},
+		PersistedState{},
+		StatusReport{
+			Schema:        StatusReportSchema,
+			ManagedBinDir: "/tmp/bin",
+			Summary: StatusSummary{
+				Overall:     StateUnknown,
+				RepoCount:   1,
+				StateCounts: map[string]int{StateCurrent: 1},
+			},
+			AttemptIntegrity: &AttemptIntegrityStatus{
+				State: AttemptIntegrityPromotionLate,
+			},
+			Repos: []RepoStatus{
+				{
+					RepoID:        "keystone-hub",
+					AdapterStatus: AdapterStatusReady,
+					State:         StateCurrent,
+					Outputs: []OutputStatus{
+						{Name: "kshub", ExpectedPath: "/tmp/bin/kshub", State: StateCurrent},
+					},
+				},
+			},
+		},
+	)
+	if got := report.Outcome; got != SyncOutcomeCompletedWithBlockers {
+		t.Fatalf("attempt-integrity-reduced final status must be non-success, got %s", got)
+	}
+}

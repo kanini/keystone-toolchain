@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -197,6 +199,120 @@ func TestSyncReportPassesOptionsToSharedReadySetExecutor(t *testing.T) {
 	if report.FinalStatus.Summary.Overall != toolchain.StateCurrent {
 		t.Fatalf("unexpected overall state: %s", report.FinalStatus.Summary.Overall)
 	}
+}
+
+func TestSyncReportFailsFastWhenLockHeld(t *testing.T) {
+	home := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=TestServiceHelperHoldSyncLock")
+	cmd.Env = append(os.Environ(), "KSTOOLCHAIN_TEST_HOLD_LOCK=1", "KSTOOLCHAIN_TEST_HOME="+home)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("wait for helper lock: %v\nstderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(line, "LOCKED") {
+		t.Fatalf("unexpected helper output: %q\nstderr=%s", line, stderr.String())
+	}
+
+	svc := New(testServiceContext(home))
+	_, _, exitCode, appErr := svc.SyncReport(toolchain.SyncOptions{})
+	if appErr == nil {
+		t.Fatal("expected sync contention failure")
+	}
+	if exitCode != contract.ExitValidation {
+		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitValidation)
+	}
+	if appErr.Code != contract.CodeSyncBusy {
+		t.Fatalf("unexpected error code: %s", appErr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".keystone", "toolchain", "state", "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("contention failure must not mutate current.json, got err=%v", err)
+	}
+}
+
+func TestSyncReportFailsClosedOnInvalidAttemptArtifact(t *testing.T) {
+	home := t.TempDir()
+	stateDir := filepath.Join(home, ".keystone", "toolchain", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "attempt.json"), []byte("{invalid\n"), 0o644); err != nil {
+		t.Fatalf("write invalid attempt artifact: %v", err)
+	}
+
+	svc := New(testServiceContext(home))
+	_, _, exitCode, appErr := svc.SyncReport(toolchain.SyncOptions{})
+	if appErr == nil {
+		t.Fatal("expected invalid attempt artifact failure")
+	}
+	if exitCode != contract.ExitValidation {
+		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitValidation)
+	}
+	if appErr.Code != contract.CodeConfigInvalid {
+		t.Fatalf("unexpected error code: %s", appErr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid attempt artifact must block current.json writes, got err=%v", err)
+	}
+}
+
+func TestSyncReportFailsClosedOnUnreadableAttemptArtifact(t *testing.T) {
+	home := t.TempDir()
+	stateDir := filepath.Join(home, ".keystone", "toolchain", "state")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	artifactPath := filepath.Join(stateDir, "attempt.json")
+	if err := os.WriteFile(artifactPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write unreadable attempt artifact: %v", err)
+	}
+	if err := os.Chmod(artifactPath, 0o000); err != nil {
+		t.Fatalf("chmod attempt artifact: %v", err)
+	}
+	defer os.Chmod(artifactPath, 0o644)
+
+	svc := New(testServiceContext(home))
+	_, _, exitCode, appErr := svc.SyncReport(toolchain.SyncOptions{})
+	if appErr == nil {
+		t.Fatal("expected unreadable attempt artifact failure")
+	}
+	if exitCode != contract.ExitInfrastructure {
+		t.Fatalf("unexpected exit code: got=%d want=%d", exitCode, contract.ExitInfrastructure)
+	}
+	if appErr.Code != contract.CodeIOError {
+		t.Fatalf("unexpected error code: %s", appErr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "current.json")); !os.IsNotExist(err) {
+		t.Fatalf("unreadable attempt artifact must block current.json writes, got err=%v", err)
+	}
+}
+
+func TestServiceHelperHoldSyncLock(t *testing.T) {
+	if os.Getenv("KSTOOLCHAIN_TEST_HOLD_LOCK") != "1" {
+		return
+	}
+	ctx := testServiceContext(os.Getenv("KSTOOLCHAIN_TEST_HOME"))
+	lock, appErr := toolchain.AcquireSyncLock(ctx)
+	if appErr != nil {
+		fmt.Fprintln(os.Stderr, appErr.Error())
+		os.Exit(2)
+	}
+	defer lock.Close()
+	fmt.Fprintln(os.Stdout, "LOCKED")
+	select {}
 }
 
 func containsString(items []string, needle string) bool {

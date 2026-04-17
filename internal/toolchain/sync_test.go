@@ -84,6 +84,16 @@ func TestSyncWritesStateAndStatusReadsIt(t *testing.T) {
 	if !present {
 		t.Fatal("expected state file to exist")
 	}
+	if strings.TrimSpace(persisted.CommittedAttemptID) == "" {
+		t.Fatal("expected current.json to carry committed_attempt_id")
+	}
+	attempt := loadAttemptArtifact(ctx)
+	if !attempt.present || attempt.invalid {
+		t.Fatalf("expected valid attempt artifact after sync, got %#v", attempt)
+	}
+	if attempt.artifact.AttemptID != persisted.CommittedAttemptID {
+		t.Fatalf("expected current.json commit correlation, got attempt=%s committed=%s", attempt.artifact.AttemptID, persisted.CommittedAttemptID)
+	}
 	t.Setenv("PATH", "")
 	report := BuildStatusReport(ctx, manifest, persisted, stateFile, true, false)
 	if got := report.Repos[0].State; got != StateUnknown {
@@ -605,6 +615,96 @@ func TestSyncMarksReadyAdapterSetupBlockedBeforeRepoWork(t *testing.T) {
 	}
 	if persisted.LastSuccessAt != prior.LastSuccessAt {
 		t.Fatalf("expected LastSuccessAt to remain unchanged, got %s", persisted.LastSuccessAt)
+	}
+}
+
+func TestBeginSyncAttemptCarriesForwardPromotionOrLaterFromUnmatchedChain(t *testing.T) {
+	home := t.TempDir()
+	ctx := testContext(home)
+	if appErr := saveAttemptArtifact(ctx, SyncAttemptArtifact{
+		Schema:                 SyncAttemptSchema,
+		AttemptID:              "attempt-old",
+		StartedAt:              "2026-04-17T21:00:00Z",
+		ReadyRepoIDs:           []string{"keystone-hub"},
+		Phase:                  AttemptPhasePrePromotion,
+		CarriedUnresolvedPhase: AttemptPhasePromotionOrLater,
+	}); appErr != nil {
+		t.Fatalf("save prior attempt artifact: %v", appErr)
+	}
+
+	controller, appErr := BeginSyncAttempt(ctx, []RepoAdapter{{RepoID: "keystone-hub"}}, "commit-old")
+	if appErr != nil {
+		t.Fatalf("begin sync attempt: %v", appErr)
+	}
+	if controller.AttemptID() == "attempt-old" {
+		t.Fatal("expected a fresh attempt id")
+	}
+	load := loadAttemptArtifact(ctx)
+	if !load.present || load.invalid {
+		t.Fatalf("expected valid successor attempt artifact, got %#v", load)
+	}
+	if got := load.artifact.Phase; got != AttemptPhasePrePromotion {
+		t.Fatalf("expected fresh attempt to start pre_promotion, got %s", got)
+	}
+	if got := load.artifact.CarriedUnresolvedPhase; got != AttemptPhasePromotionOrLater {
+		t.Fatalf("expected carried unresolved phase to preserve prior promotion boundary, got %s", got)
+	}
+}
+
+func TestSyncClearsCarriedUnresolvedPhaseAfterCorrelatedCommit(t *testing.T) {
+	home := t.TempDir()
+	ctx := testContext(home)
+	repoPath := testGitRepo(t, home)
+	installScript := filepath.Join(home, "install.sh")
+	writeExecutable(t, installScript, "#!/bin/sh\nset -eu\nmkdir -p \"$1\"\nprintf '#!/bin/sh\\necho kshub test\\n' > \"$1/kshub\"\nchmod +x \"$1/kshub\"\n")
+	if appErr := saveAttemptArtifact(ctx, SyncAttemptArtifact{
+		Schema:                 SyncAttemptSchema,
+		AttemptID:              "attempt-old",
+		StartedAt:              "2026-04-17T21:00:00Z",
+		ReadyRepoIDs:           []string{"keystone-hub"},
+		Phase:                  AttemptPhasePromotionOrLater,
+		CarriedUnresolvedPhase: AttemptPhasePromotionOrLater,
+	}); appErr != nil {
+		t.Fatalf("save prior attempt artifact: %v", appErr)
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        repoPath,
+				InstallCmd:      []string{installScript, "{{stage_bin}}"},
+				ExpectedOutputs: []string{"kshub"},
+				ProbeCmd:        []string{"/bin/sh", "-c", "\"{{stage_bin}}/kshub\" >/dev/null"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	prior := PersistedState{
+		Schema:             PersistedStateSchema,
+		ManagedBinDir:      ctx.Config.ManagedBinDir,
+		CommittedAttemptID: "commit-old",
+	}
+
+	if appErr := SyncReadySet(ctx, manifest, prior, true, SyncOptions{}); appErr != nil {
+		t.Fatalf("sync ready set: %v", appErr)
+	}
+	persisted, _, _, _, appErr := LoadPersistedState(ctx)
+	if appErr != nil {
+		t.Fatalf("load state: %v", appErr)
+	}
+	load := loadAttemptArtifact(ctx)
+	if !load.present || load.invalid {
+		t.Fatalf("expected valid attempt artifact after successful retry, got %#v", load)
+	}
+	if load.artifact.AttemptID != persisted.CommittedAttemptID {
+		t.Fatalf("expected successful current.json to correlate to latest attempt, got attempt=%s committed=%s", load.artifact.AttemptID, persisted.CommittedAttemptID)
+	}
+	if load.artifact.CarriedUnresolvedPhase != "" {
+		t.Fatalf("expected correlated success to clear carried unresolved phase, got %q", load.artifact.CarriedUnresolvedPhase)
 	}
 }
 

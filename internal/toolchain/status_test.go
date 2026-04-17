@@ -251,6 +251,311 @@ func TestBuildStatusReportKeepsDirtySkippedWhenHeadMoves(t *testing.T) {
 	}
 }
 
+func TestBuildStatusReportProjectsUnresolvedPrePromotionAttemptWithoutRewritingRepoRows(t *testing.T) {
+	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
+	head, ok := lookupRepoHead(repoPath)
+	if !ok {
+		t.Fatal("expected repo HEAD")
+	}
+	t.Setenv("PATH", filepath.Join(home, ".keystone", "toolchain", "active", "bin"))
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir managed bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write managed binary: %v", err)
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        repoPath,
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:             PersistedStateSchema,
+		ManagedBinDir:      ctx.Config.ManagedBinDir,
+		CommittedAttemptID: "commit-1",
+		Repos: []PersistedRepoState{
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateCurrent,
+				RepoHead:              head,
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           head,
+				ActiveSourceKind:      SourceKindCleanHead,
+			},
+		},
+	}
+	if appErr := saveAttemptArtifact(ctx, SyncAttemptArtifact{
+		Schema:       SyncAttemptSchema,
+		AttemptID:    "attempt-2",
+		StartedAt:    "2026-04-17T21:00:00Z",
+		ReadyRepoIDs: []string{"keystone-hub"},
+		Phase:        AttemptPhasePrePromotion,
+	}); appErr != nil {
+		t.Fatalf("save attempt artifact: %v", appErr)
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if got := report.Repos[0].State; got != StateCurrent {
+		t.Fatalf("repo row must stay anchored in current.json, got %s", got)
+	}
+	if report.AttemptIntegrity == nil {
+		t.Fatal("expected attempt integrity overlay")
+	}
+	if got := report.AttemptIntegrity.State; got != AttemptIntegrityPrePromotion {
+		t.Fatalf("unexpected attempt integrity state: %s", got)
+	}
+	if got := report.Summary.Overall; got != StateUnknown {
+		t.Fatalf("expected suite overall to lose trusted CURRENT, got %s", got)
+	}
+	if got := StatusExitCode(report); got != 1 {
+		t.Fatalf("expected non-zero status exit when attempt integrity is unresolved, got %d", got)
+	}
+}
+
+func TestBuildStatusReportProjectsUnresolvedPromotionAttemptAsSuiteLevelBlocker(t *testing.T) {
+	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
+	head, ok := lookupRepoHead(repoPath)
+	if !ok {
+		t.Fatal("expected repo HEAD")
+	}
+	t.Setenv("PATH", filepath.Join(home, ".keystone", "toolchain", "active", "bin"))
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir managed bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write managed binary: %v", err)
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        repoPath,
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:             PersistedStateSchema,
+		ManagedBinDir:      ctx.Config.ManagedBinDir,
+		CommittedAttemptID: "commit-1",
+		Repos: []PersistedRepoState{
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateCurrent,
+				RepoHead:              head,
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           head,
+				ActiveSourceKind:      SourceKindCleanHead,
+			},
+		},
+	}
+	if appErr := saveAttemptArtifact(ctx, SyncAttemptArtifact{
+		Schema:                 SyncAttemptSchema,
+		AttemptID:              "attempt-2",
+		StartedAt:              "2026-04-17T21:00:00Z",
+		ReadyRepoIDs:           []string{"keystone-hub"},
+		Phase:                  AttemptPhasePrePromotion,
+		CarriedUnresolvedPhase: AttemptPhasePromotionOrLater,
+	}); appErr != nil {
+		t.Fatalf("save attempt artifact: %v", appErr)
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if report.AttemptIntegrity == nil {
+		t.Fatal("expected attempt integrity overlay")
+	}
+	if got := report.AttemptIntegrity.State; got != AttemptIntegrityPromotionLate {
+		t.Fatalf("unexpected attempt integrity state: %s", got)
+	}
+	if got := report.Repos[0].State; got != StateCurrent {
+		t.Fatalf("repo row must remain CURRENT, got %s", got)
+	}
+	lines := strings.Join(RenderStatusText(report), "\n")
+	if !strings.Contains(lines, "Attempt integrity: "+AttemptIntegrityPromotionLate) {
+		t.Fatalf("expected attempt integrity in text render: %s", lines)
+	}
+	if !strings.Contains(lines, "run `kstoolchain sync` again") {
+		t.Fatalf("expected rerun guidance in text render: %s", lines)
+	}
+}
+
+func TestBuildStatusReportInvalidAttemptArtifactFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
+	head, ok := lookupRepoHead(repoPath)
+	if !ok {
+		t.Fatal("expected repo HEAD")
+	}
+	t.Setenv("PATH", filepath.Join(home, ".keystone", "toolchain", "active", "bin"))
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir managed bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write managed binary: %v", err)
+	}
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.StateDir, syncAttemptFileName), []byte("{invalid\n"), 0o644); err != nil {
+		t.Fatalf("write invalid attempt artifact: %v", err)
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        repoPath,
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateCurrent,
+				RepoHead:              head,
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           head,
+				ActiveSourceKind:      SourceKindCleanHead,
+			},
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if report.AttemptIntegrity == nil {
+		t.Fatal("expected invalid attempt artifact to fail closed")
+	}
+	if got := report.AttemptIntegrity.State; got != AttemptIntegrityArtifactBad {
+		t.Fatalf("unexpected attempt integrity state: %s", got)
+	}
+	if got := report.Summary.Overall; got != StateUnknown {
+		t.Fatalf("expected invalid attempt artifact to suppress trusted CURRENT, got %s", got)
+	}
+	if got := report.Repos[0].State; got != StateCurrent {
+		t.Fatalf("repo row must remain current.json truth, got %s", got)
+	}
+}
+
+func TestBuildStatusReportUnknownAttemptSchemaFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	repoPath := testGitRepo(t, home)
+	head, ok := lookupRepoHead(repoPath)
+	if !ok {
+		t.Fatal("expected repo HEAD")
+	}
+	t.Setenv("PATH", filepath.Join(home, ".keystone", "toolchain", "active", "bin"))
+
+	ctx := &runtime.Context{
+		HomeDir: home,
+		Config: runtime.Config{
+			ManagedBinDir: filepath.Join(home, ".keystone", "toolchain", "active", "bin"),
+			StateDir:      filepath.Join(home, ".keystone", "toolchain", "state"),
+		},
+	}
+	if err := os.MkdirAll(ctx.Config.ManagedBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir managed bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ctx.Config.ManagedBinDir, "kshub"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write managed binary: %v", err)
+	}
+	if err := os.MkdirAll(ctx.Config.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	raw := `{
+  "schema": "kstoolchain.sync-attempt/v9alpha9",
+  "attempt_id": "attempt-2",
+  "started_at": "2026-04-17T21:00:00Z",
+  "ready_repo_ids": ["keystone-hub"],
+  "phase": "pre_promotion"
+}`
+	if err := os.WriteFile(filepath.Join(ctx.Config.StateDir, syncAttemptFileName), []byte(raw), 0o644); err != nil {
+		t.Fatalf("write attempt artifact: %v", err)
+	}
+	manifest := Manifest{
+		Schema:        "kstoolchain.adapter/v1alpha1",
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []RepoAdapter{
+			{
+				RepoID:          "keystone-hub",
+				RepoPath:        repoPath,
+				ExpectedOutputs: []string{"kshub"},
+				DirtyPolicy:     DirtyPolicyFailClosed,
+				ReleaseUnit:     ReleaseUnitRepo,
+				Status:          AdapterStatusReady,
+			},
+		},
+	}
+	persisted := PersistedState{
+		Schema:        PersistedStateSchema,
+		ManagedBinDir: ctx.Config.ManagedBinDir,
+		Repos: []PersistedRepoState{
+			{
+				RepoID:                "keystone-hub",
+				State:                 StateCurrent,
+				RepoHead:              head,
+				LastAttemptSourceKind: SourceKindCleanHead,
+				ActiveBuild:           head,
+				ActiveSourceKind:      SourceKindCleanHead,
+			},
+		},
+	}
+
+	report := BuildStatusReport(ctx, manifest, persisted, filepath.Join(ctx.Config.StateDir, "current.json"), true, false)
+	if report.AttemptIntegrity == nil {
+		t.Fatal("expected unknown attempt schema to fail closed")
+	}
+	if got := report.AttemptIntegrity.State; got != AttemptIntegrityArtifactBad {
+		t.Fatalf("unexpected attempt integrity state: %s", got)
+	}
+}
+
 func TestBuildStatusReportCurrentRequiresManagedPathResolution(t *testing.T) {
 	home := t.TempDir()
 	repoPath := testGitRepo(t, home)
